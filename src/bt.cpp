@@ -748,6 +748,11 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     return ret;
 }
 
+std::vector<uint8_t> bt_peek_feature(uint8_t reportId) {
+    auto it = feature_data.find(reportId);
+    return (it != feature_data.end()) ? it->second : std::vector<uint8_t>{};
+}
+
 void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
     if (hid_control_cid != 0) {
         uint8_t get_feature[len + 2];

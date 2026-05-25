@@ -12,6 +12,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 - **L3 / R3 click indicator on the OLED Status screen.** Clicking a stick in now flashes its analog-stick box inverse (white box, black dot) for as long as it's held — previously the stick clicks had no on-screen feedback. Mirrored in the web config tool's OLED Preview.
 
+### Changed
+
+- **Gyro Tilt screen reworked: per-unit IMU calibration, a tilt dot that centres when flat, and intuitive direction.** Three things, all display-only — the host input report (all gyro + accel axes) is still forwarded byte-for-byte, so in-game motion is unaffected:
+  - **Calibration.** The DualSense ships factory gyro/accel bias + sensitivity in feature report `0x05` (which the dongle already fetches and caches at connect). Previously the tilt visuals used raw accel counts; now the cached `0x05` is parsed once per connection (re-read per controller, so it stays correct across the 4 pairing slots) and applied as `(raw − bias) × sensitivity`, keeping the same ±8192 ≈ 1 g scale. A bad/short read is rejected (same sanity gate SDL uses) and it falls back to raw — no regression when calibration is unavailable. The tilt→RGB lightbar mode uses the corrected accel too. Parse/apply mirror SDL's `SDL_hidapi_ps5.c` (zlib-licensed; credit).
+  - **Centred when flat.** The dot is now driven by the X (roll) and **Z** (pitch) axes — the two that read ~0 when the controller lies flat — instead of X/Y. Gravity rests on Y when flat, so the old Y mapping pegged the dot to the bottom edge at rest; it now sits centred.
+  - **Direction follows the controller.** Both axes are negated so tilting left moves the dot left and tilting forward moves it up, instead of mirrored.
+  - The dot centring + direction are mirrored in the web config tool's OLED Preview (its mock IMU now also rests gravity on Y to match real hardware).
+
+### Fixed
+
+- **Charge-ETA no longer balloons off a single slow 10% step.** The Status-screen `~Nm` charge estimate timed each 10% battery step and projected the rest, but one anomalously slow step (e.g. ~47 min — observed reading `~222m` at 70% on the dock) used to drag the whole projection up because the rate was a mean over only 3 steps. Each timed step's bulk-equivalent is now clamped to a 30-min ceiling and the rate is taken as the **median** over the last 5 steps, so a single under-load/anomalous reading can't dominate. Mirrored in the web OLED Preview emulator.
+
 ---
 
 ## [0.6.9-oled-edition] — 2026-05-24

@@ -560,6 +560,15 @@ ChargeEta g_charge_eta{};
 // the "?") as soon as the first clean step completes.
 constexpr float kDefaultStepUs = 15.0f * 60.0f * 1000000.0f;
 
+// Ceiling on a single timed step's bulk-equivalent duration. A genuine idle 10%
+// step on this dongle is ~15 min; anything past ~30 min is almost always an
+// anomalous/under-load sample (e.g. the controller in use while charging, or a
+// battery-nibble bounce) that would otherwise balloon the projection — observed
+// reading ~222m at 70% off one ~47-min step. We clamp such samples instead of
+// trusting them, and pair that with a median over kRing steps so one bad reading
+// can't dominate the estimate.
+constexpr float kMaxStepUs = 30.0f * 60.0f * 1000000.0f;
+
 // Relative time the step *ending* at `to_level` (10% units, 1..10) takes vs a
 // bulk step. Tuned to the Li-ion CV taper: ~80% onward stretches out.
 static float charge_step_weight(int to_level) {
@@ -569,7 +578,7 @@ static float charge_step_weight(int to_level) {
 }
 
 void sample_charge_eta() {
-    constexpr int kRing = 3;                 // average the last few steps
+    constexpr int kRing = 5;                 // median over the last few steps
     static float    ring[kRing] = {0};       // bulk-equivalent step durations (us)
     static int      ring_count = 0;
     static int      ring_head = 0;
@@ -608,7 +617,9 @@ void sample_charge_eta() {
         if (first_step_pending) {
             first_step_pending = false;
         } else {
-            ring[ring_head] = dur / charge_step_weight(step);
+            float be = dur / charge_step_weight(step);
+            if (be > kMaxStepUs) be = kMaxStepUs;   // clamp under-load/anomalous outliers
+            ring[ring_head] = be;
             ring_head = (ring_head + 1) % kRing;
             if (ring_count < kRing) ring_count++;
         }
@@ -630,9 +641,18 @@ void sample_charge_eta() {
         const bool measured = (ring_count > 0);
         float bulk;
         if (measured) {
-            bulk = 0.0f;
-            for (int i = 0; i < ring_count; i++) bulk += ring[i];
-            bulk /= (float)ring_count;
+            // Median of the timed steps — robust to a single slow/fast outlier
+            // in a way the old mean wasn't (one 47-min under-load step used to
+            // drag the whole projection up). kRing is tiny, so insertion-sort.
+            float tmp[kRing];
+            for (int i = 0; i < ring_count; i++) tmp[i] = ring[i];
+            for (int i = 1; i < ring_count; i++) {
+                const float v = tmp[i];
+                int j = i - 1;
+                while (j >= 0 && tmp[j] > v) { tmp[j + 1] = tmp[j]; j--; }
+                tmp[j + 1] = v;
+            }
+            bulk = tmp[ring_count / 2];
         } else {
             bulk = kDefaultStepUs;
         }
@@ -1033,6 +1053,85 @@ __attribute__((noinline)) void render_screen_triggers() {
     flush_fb();
 }
 
+// --- IMU calibration (DS5 feature report 0x05) ---------------------------
+// The DualSense ships per-unit gyro/accel calibration in feature report 0x05,
+// which bt.cpp already fetches and caches at connect (init_feature). Parsing it
+// lets the Gyro Tilt screen and the tilt->RGB lightbar mode use bias- and
+// sensitivity-corrected accel instead of raw counts, so the tilt dot recenters
+// per controller. Parse + apply mirror SDL's SDL_hidapi_ps5.c (zlib-licensed)
+// LoadCalibrationData/ApplyCalibrationData (credit); feature_data[0x05]'s byte
+// layout matches SDL's data[] (index 0 = report id, calibration words from 1).
+//
+// imu_apply keeps accel in the same +-8192 == 1g count space the callers already
+// scale by, so existing /8192 (gyro screen) and +-8192 (lightbar) math is
+// unchanged — calibration only removes the per-axis zero offset and corrects gain.
+struct ImuCal { int16_t bias; float sens; };  // 0..2 gyro P/Y/R, 3..5 accel X/Y/Z
+ImuCal g_imu_cal[6];
+bool   g_imu_cal_valid = false;   // a plausible calibration was loaded
+bool   g_imu_cal_tried = false;   // 0x05 has been seen this connection (good or bad)
+
+constexpr float kGyroResPerDeg = 1024.0f;
+constexpr float kAccelResPerG  = 8192.0f;
+
+inline int16_t cal_ld16(const std::vector<uint8_t>& d, int i) {
+    return (int16_t)((uint16_t)d[i] | ((uint16_t)d[i + 1] << 8));
+}
+
+__attribute__((noinline))
+void imu_cal_parse(const std::vector<uint8_t>& d) {
+    g_imu_cal_valid = false;
+    if (d.size() < 35) return;                 // SDL requires >= 35 calibration bytes
+
+    const int16_t gPB = cal_ld16(d, 1),  gYB = cal_ld16(d, 3),  gRB = cal_ld16(d, 5);
+    const int16_t gPp = cal_ld16(d, 7),  gPm = cal_ld16(d, 9);
+    const int16_t gYp = cal_ld16(d, 11), gYm = cal_ld16(d, 13);
+    const int16_t gRp = cal_ld16(d, 15), gRm = cal_ld16(d, 17);
+    const int16_t gSp = cal_ld16(d, 19), gSm = cal_ld16(d, 21);
+    const int16_t aXp = cal_ld16(d, 23), aXm = cal_ld16(d, 25);
+    const int16_t aYp = cal_ld16(d, 27), aYm = cal_ld16(d, 29);
+    const int16_t aZp = cal_ld16(d, 31), aZm = cal_ld16(d, 33);
+
+    const float num = (float)(gSp + gSm) * kGyroResPerDeg;
+    g_imu_cal[0] = { gPB, num / (float)(gPp - gPm) };
+    g_imu_cal[1] = { gYB, num / (float)(gYp - gYm) };
+    g_imu_cal[2] = { gRB, num / (float)(gRp - gRm) };
+
+    int16_t r;
+    r = aXp - aXm; g_imu_cal[3] = { (int16_t)(aXp - r / 2), 2.0f * kAccelResPerG / (float)r };
+    r = aYp - aYm; g_imu_cal[4] = { (int16_t)(aYp - r / 2), 2.0f * kAccelResPerG / (float)r };
+    r = aZp - aZm; g_imu_cal[5] = { (int16_t)(aZp - r / 2), 2.0f * kAccelResPerG / (float)r };
+
+    // Sanity gate (same as SDL): a wild bias or a gain off by >50% means a bad
+    // factory cal or a short/garbled read — fall back to raw rather than amplify it.
+    for (int i = 0; i < 6; i++) {
+        const float divisor = (i < 3) ? 64.0f : 1.0f;
+        const int   ab      = g_imu_cal[i].bias < 0 ? -g_imu_cal[i].bias : g_imu_cal[i].bias;
+        float       gain    = 1.0f - g_imu_cal[i].sens / divisor;
+        if (gain < 0) gain = -gain;
+        if (ab > 1024 || gain > 0.5f) return;  // leave g_imu_cal_valid = false
+    }
+    g_imu_cal_valid = true;
+}
+
+// Poll once per frame from oled_loop: parse 0x05 the first time it is available
+// for this controller, and reset on disconnect so the next controller re-reads.
+void imu_cal_service() {
+    if (!bt_is_connected()) { g_imu_cal_valid = false; g_imu_cal_tried = false; return; }
+    if (g_imu_cal_tried) return;
+    auto d = bt_peek_feature(0x05);
+    if (d.size() < 35) return;                 // not arrived yet — retry next frame
+    imu_cal_parse(d);
+    g_imu_cal_tried = true;
+}
+
+// index 0..2 gyro, 3..5 accel. Returns the calibrated value in the same count
+// scale the raw value used (+-8192 == 1g for accel); identity when no valid
+// calibration is loaded, so behaviour matches the pre-calibration firmware.
+inline int16_t imu_apply(int index, int16_t raw) {
+    if (!g_imu_cal_valid) return raw;
+    return (int16_t)((float)(raw - g_imu_cal[index].bias) * g_imu_cal[index].sens);
+}
+
 __attribute__((noinline)) void render_screen_gyro() {
     fb_clear();
     draw_text(kContentX, 0, "Gyro Tilt");
@@ -1041,6 +1140,9 @@ __attribute__((noinline)) void render_screen_gyro() {
         memcpy(&ax, &interrupt_in_data[21], 2);
         memcpy(&ay, &interrupt_in_data[23], 2);
         memcpy(&az, &interrupt_in_data[25], 2);
+        ax = imu_apply(3, ax);  // bias/sensitivity-corrected accel (identity if no cal)
+        ay = imu_apply(4, ay);
+        az = imu_apply(5, az);
         char buf[16];
         snprintf(buf, sizeof(buf), "X%+5d", ax); draw_text(kContentX, 10, buf);
         snprintf(buf, sizeof(buf), "Y%+5d", ay); draw_text(50, 10, buf);
@@ -1050,8 +1152,15 @@ __attribute__((noinline)) void render_screen_gyro() {
         rect_outline(bx, by, bw, bh);
         for (int x = bx + 1; x < bx + bw - 1; x++) px(x, by + bh / 2, true);
         for (int y = by + 1; y < by + bh - 1; y++) px(bx + bw / 2, y, true);
-        int dx = ((int)ax * (bw / 2 - 3)) / 8192;
-        int dy = ((int)ay * (bh / 2 - 3)) / 8192;
+        // Plot the two axes that read ~0 when the controller lies flat: X (roll,
+        // left/right) and Z (pitch, fwd/back). Gravity rests on Y when flat, so
+        // driving the dot from Y pegged it to the bottom edge at rest — using Z
+        // keeps the dot centred flat and it tracks as you tilt. (Readout above
+        // still shows all three raw axes.)
+        // Negated so the dot follows the tilt direction: tilt left -> dot left,
+        // tilt forward -> dot up (gravity pulls the opposite way on the axis).
+        int dx = -((int)ax * (bw / 2 - 3)) / 8192;
+        int dy = -((int)az * (bh / 2 - 3)) / 8192;
         int cx = bx + bw / 2 + dx;
         int cy = by + bh / 2 + dy;
         if (cx < bx + 2) cx = bx + 2;
@@ -1230,6 +1339,9 @@ void lightbar_compute_mode(int mode, uint32_t now_ms) {
         memcpy(&ax, &interrupt_in_data[21], 2);
         memcpy(&ay, &interrupt_in_data[23], 2);
         memcpy(&az, &interrupt_in_data[25], 2);
+        ax = imu_apply(3, ax);  // calibrated accel keeps the +-8192 == 1g scale below
+        ay = imu_apply(4, ay);
+        az = imu_apply(5, az);
         const int rr = ((int)ax + 8192) * 255 / 16384;
         const int gg = ((int)ay + 8192) * 255 / 16384;
         const int bb = ((int)az + 8192) * 255 / 16384;
@@ -1751,6 +1863,9 @@ void oled_loop() {
     // Track charge progress every frame — before the power-ladder early-returns
     // below, so step timing stays correct even while the panel is dimmed/off.
     sample_charge_eta();
+    // Parse the DS5's per-unit IMU calibration once it lands (no-op until then),
+    // so the tilt screen + tilt->RGB lightbar use corrected accel. See imu_apply().
+    imu_cal_service();
     // Drive the controller LED every frame (any screen / power state): charging
     // pulse, selected OLED mode, or hand-off to the host. See lightbar_service().
     lightbar_service();
