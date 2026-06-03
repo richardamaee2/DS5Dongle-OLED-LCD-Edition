@@ -52,6 +52,10 @@ constexpr int kRowBytes = kW / 8;
 constexpr int kFbBytes = kRowBytes * kH;
 
 uint8_t fb[kFbBytes];
+uint8_t fb_tx[kFbBytes];
+uint8_t reverse_lut[256];
+int flush_progress = -1;
+constexpr int kFlushChunkRows = 8;
 
 uint32_t last_render_us = 0;
 constexpr uint32_t kFrameUs = 100000;
@@ -237,7 +241,9 @@ void sh1107_init() {
 // lives near the other text-drawing helpers below.
 void draw_button_chrome();
 
-void flush_fb_raw() {
+// Blocking SPI flush — used only during boot splash before the main loop
+// starts (no audio/BT to service yet, so blocking is fine).
+void flush_fb_raw_blocking() {
     cmd(0xB0);
     for (int j = 0; j < kH; j++) {
         const uint8_t col = kH - 1 - j;
@@ -249,10 +255,44 @@ void flush_fb_raw() {
     }
 }
 
-void flush_fb() {
-    draw_button_chrome();
-    flush_fb_raw();
+// Prepare a chunked (non-blocking) SPI flush. Pre-reverses the framebuffer
+// into fb_tx via the LUT and sets flush_progress = 0. The actual SPI
+// transfer is driven by flush_chunk(), called from oled_loop() on
+// subsequent iterations — each chunk flushes kFlushChunkRows rows (~130 µs)
+// then yields back to the main loop so audio_loop / tud_task /
+// cyw43_arch_poll stay serviced. This eliminates the ~1.1 ms blocking
+// window that caused audio distortion when the OLED was active (issue #7).
+void flush_prepare(bool chrome) {
+    if (chrome) draw_button_chrome();
+    for (int i = 0; i < kFbBytes; i++) fb_tx[i] = reverse_lut[fb[i]];
+    flush_progress = 0;
 }
+
+bool flush_chunk() {
+    if (flush_progress < 0) return true;
+    if (flush_progress == 0) cmd(0xB0);
+    const int end = (flush_progress + kFlushChunkRows < kH)
+                    ? flush_progress + kFlushChunkRows : kH;
+    for (int j = flush_progress; j < end; j++) {
+        const uint8_t col = kH - 1 - j;
+        cmd(0x00 + (col & 0x0F));
+        cmd(0x10 + (col >> 4));
+        gpio_put(kPinDC, 1);
+        gpio_put(kPinCS, 0);
+        spi_write_blocking(spi1, &fb_tx[j * kRowBytes], kRowBytes);
+        gpio_put(kPinCS, 1);
+    }
+    flush_progress = end;
+    if (flush_progress >= kH) {
+        flush_progress = -1;
+        return true;
+    }
+    return false;
+}
+
+void flush_fb_raw() { flush_prepare(false); }
+
+void flush_fb() { flush_prepare(true); }
 
 void fb_clear() { memset(fb, 0, sizeof(fb)); }
 
@@ -542,8 +582,10 @@ void handle_buttons() {
 
 // --- Charge ETA tracker --------------------------------------------------
 // The DS5 only reports battery in 10% steps (interrupt_in_data[52] low
-// nibble, 0..10; high nibble is power-state, 1 == charging). We can't read a
-// finer percentage over BT, so a smooth countdown is impossible. Instead we
+// nibble, 0..10; high nibble is power-state, 1 == charging). We display the
+// midpoint of each band (+5), matching the kernel hid-playstation driver and
+// Steam: 5, 15, 25, … 95, 100%. We can't read a finer percentage over BT,
+// so a smooth countdown is impossible. Instead we
 // time how long each 10% step takes while charging and extrapolate the
 // remaining steps. Sampled once per frame from oled_loop (continuously, so
 // the estimate stays current even while the panel is dimmed/off and even when
@@ -701,8 +743,8 @@ __attribute__((noinline)) void render_screen() {
         draw_text(kContentX, 9, buf);
 
         const uint8_t pwr = interrupt_in_data[52];
-        int pct = (pwr & 0x0F) * 10;
-        if (pct > 100) pct = 100;
+        int raw = pwr & 0x0F;
+        int pct = (raw >= 10) ? 100 : raw * 10 + 5;
         const uint8_t pstate = pwr >> 4;
         char marker = ' ';
         if (pstate == 1) marker = '+';      // Charging
@@ -1807,13 +1849,15 @@ void boot_splash() {
     draw_text(cx_for(l1), 16, l1);
     draw_text(cx_for(l2), 30, l2);
     draw_text(cx_for(l3), 44, l3);
-    flush_fb();
+    draw_button_chrome();
+    flush_fb_raw_blocking();
     sleep_ms(1500);
 }
 
 } // namespace
 
 void oled_init() {
+    for (int i = 0; i < 256; i++) reverse_lut[i] = reverse_byte((uint8_t)i);
     spi_init(spi1, 10 * 1000 * 1000);
     gpio_set_function(kPinCLK, GPIO_FUNC_SPI);
     gpio_set_function(kPinMOSI, GPIO_FUNC_SPI);
@@ -1874,6 +1918,10 @@ void oled_loop() {
     handle_buttons();
     const uint32_t now = time_us_32();
     rumble_burst_tick(now);
+    if (flush_progress >= 0) {
+        flush_chunk();
+        return;
+    }
     if ((now - last_render_us) < kFrameUs) return;
     last_render_us = now;
     // Track charge progress every frame — before the power-ladder early-returns

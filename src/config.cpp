@@ -72,7 +72,7 @@ void config_valid() {
         printf("[Config] polling_rate_mode is invalid\n");
     }
     if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {
-        body->audio_buffer_length = 64;
+        body->audio_buffer_length = 16;  // low buffer avoids the DS5's periodic re-buffer gap
         printf("[Config] haptics_buffer_length is invalid\n");
     }
     if (body->controller_mode > 2) {
@@ -84,8 +84,8 @@ void config_valid() {
         printf("[Config] current_slot is invalid\n");
     }
     if (body->auto_haptics_enable > 3) {
-        body->auto_haptics_enable = 1; // Fallback default
-        printf("[Config] auto_haptics_enable invalid, defaulting to 1 (Fallback)\n");
+        body->auto_haptics_enable = 0; // default OFF (was 1/Fallback) — it derives erratic rumble from the speaker
+        printf("[Config] auto_haptics_enable invalid, defaulting to 0 (Off)\n");
     }
     if (body->auto_haptics_gain > 200) {
         body->auto_haptics_gain = 100;

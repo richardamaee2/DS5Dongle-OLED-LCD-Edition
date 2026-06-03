@@ -20,7 +20,7 @@
 
 #define INPUT_CHANNELS    4
 #define OUTPUT_CHANNELS   2
-#define SAMPLE_SIZE       64
+#define SAMPLE_SIZE       60   // 60 B = 30 haptic frames @ 3 kHz = 10.00 ms/packet → true 100 Hz cadence
 #define REPORT_SIZE       398
 #define REPORT_ID         0x36
 // #define VOLUME_GAIN       2
@@ -80,7 +80,7 @@ static volatile uint32_t g_mic_plc_frames = 0;        // concealed frames genera
 uint32_t audio_mic_plc_frames() { return g_mic_plc_frames; }
 
 struct audio_raw_element {
-    float data[512 * 2];
+    float data[480 * 2];   // exactly one 10 ms Opus frame (480 stereo samples)
 };
 
 void set_headset(bool state) {
@@ -96,6 +96,10 @@ uint32_t opus_fifo_drops() { return 0; }
 // emulator's USB / BT rate display. Updated below.
 static volatile uint32_t g_usb_frames = 0;
 static volatile uint32_t g_bt_packets = 0;
+static volatile int32_t g_opus_last_ret = 0;
+static volatile uint32_t g_fifo_drops = 0;
+static volatile uint32_t g_opus_encodes = 0;
+static volatile bool g_opus_ready = false;
 uint32_t audio_usb_frames() { return g_usb_frames; }
 uint32_t audio_bt_packets() { return g_bt_packets; }
 
@@ -258,7 +262,7 @@ void audio_loop() {
     }
     g_usb_frames += (uint32_t)frames;
 
-    static float audio_buf[512 * 2];
+    static float audio_buf[480 * 2];
     static uint audio_buf_pos = 0;
     // 2. 从4ch中提取ch3/ch4，转换为float输入重采样器
     WDL_ResampleSample *in_buf;
@@ -306,11 +310,12 @@ void audio_loop() {
  #if !DISABLE_SPEAKER_PROC
         audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS] / 32768.0f * audio_gain;
         audio_buf[audio_buf_pos++] = raw[i * INPUT_CHANNELS + 1] / 32768.0f * audio_gain;
-        if (audio_buf_pos == 512 * 2) {
+        if (audio_buf_pos == 480 * 2) {
             static audio_raw_element element{};
-            memcpy(element.data, audio_buf, 512 * 2 * 4);
+            memcpy(element.data, audio_buf, 480 * 2 * 4);
             if (queue_is_full(&audio_fifo)) {
                 queue_try_remove(&audio_fifo,NULL);
+                g_fifo_drops++;
             }
             if (!queue_try_add(&audio_fifo, &element)) {
                 printf("[Audio] Warning: audio_fifo add failed\n");
@@ -402,20 +407,45 @@ void audio_loop() {
         pkt[77] = SAMPLE_SIZE;
         memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
 #if !DISABLE_SPEAKER_PROC
-        // Speaker Audio Data
-        pkt[142] = (plug_headset ? 0x16 : 0x13) | 0 << 6 | 1 << 7; // Speaker: 0x13
+        // Speaker Audio Data — MUST immediately follow the haptic block. The DS5
+        // parses sub-reports sequentially (header + len + data), so this offset is
+        // 78 + SAMPLE_SIZE, NOT a fixed 142. At SAMPLE_SIZE 64 that worked out to
+        // 142; shrinking the haptic block to 60 without moving this is what
+        // silenced the speaker (controller couldn't locate the speaker sub-report).
+        constexpr int kSpkOff = 78 + SAMPLE_SIZE;   // = 138 at SAMPLE_SIZE 60
+        pkt[kSpkOff] = (plug_headset ? 0x16 : 0x13) | 0 << 6 | 1 << 7; // Speaker: 0x13
         // L Headset Mono: 0x14
         // L Headset R Speaker: 0x15
         // Headset: 0x16
-        pkt[143] = 200;
+        pkt[kSpkOff + 1] = 200;
         critical_section_enter_blocking(&opus_cs);
-        memcpy(pkt + 144, opus_buf, 200);
+        memcpy(pkt + kSpkOff + 2, opus_buf, 200);
         critical_section_exit(&opus_cs);
 #endif
 
         bt_write(pkt, sizeof(pkt));
         g_bt_packets++;
         haptic_buf_pos = 0;
+
+        // Debug: dump 5 consecutive Opus frames (skip first 10 to let encoder settle)
+        {
+            static int dump_count = 0;
+            if (g_bt_packets > 10 && dump_count < 5) {
+                dump_count++;
+                printf("[OPUS_FRAME_%d] ", dump_count);
+                critical_section_enter_blocking(&opus_cs);
+                for (int di = 0; di < 200; di++) printf("%02x", opus_buf[di]);
+                critical_section_exit(&opus_cs);
+                printf("\n");
+            }
+            if ((g_bt_packets % 94) == 0) {
+                printf("[AUD] usb=%lu enc=%lu bt=%lu opus_ret=%ld fifo_drop=%lu hs=%d\n",
+                       (unsigned long)g_usb_frames, (unsigned long)g_opus_encodes,
+                       (unsigned long)g_bt_packets, (long)g_opus_last_ret,
+                       (unsigned long)g_fifo_drops,
+                       plug_headset ? 1 : 0);
+            }
+        }
     }
 }
 
@@ -443,7 +473,6 @@ void audio_init() {
 }
 
 static OpusEncoder *encoder;
-static WDL_Resampler resampler_audio;
 
 void core1_entry() {
     int error = 0;
@@ -455,28 +484,25 @@ void core1_entry() {
     opus_encoder_ctl(encoder,OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_10_MS));
     opus_encoder_ctl(encoder,OPUS_SET_BITRATE(200 * 8 * 100));
     opus_encoder_ctl(encoder,OPUS_SET_VBR(false));
-    opus_encoder_ctl(encoder,OPUS_SET_COMPLEXITY(0)); // max 4
-    resampler_audio.SetMode(true, 0, false);
-    resampler_audio.SetRates(51200, 48000);
-    resampler_audio.SetFeedMode(true);
-    resampler_audio.Prealloc(2, 512, 480);
+    opus_encoder_ctl(encoder,OPUS_SET_COMPLEXITY(0)); // 5 overloaded core1 (stale frames -> worse); 0 keeps up
 
     while (true) {
         static audio_raw_element audio_element{};
         queue_remove_blocking(&audio_fifo, &audio_element);
-        // 将 512 frames 重采样成 480 frames 以解决噪音问题。感谢 @Junhoo
-        WDL_ResampleSample *in_buf;
-        int nframes = resampler_audio.ResamplePrepare(512, 2, &in_buf);
-        for (int i = 0; i < nframes * 2; i++) {
-            in_buf[i] = audio_element.data[i];
-        }
-        static WDL_ResampleSample out_buf[480 * 2];
-        resampler_audio.ResampleOut(out_buf, nframes, 480, 2);
-
+        // audio_element is exactly 480 stereo frames (10 ms @ 48 kHz) = one native
+        // Opus frame, so encode it directly. The old 512→480 (51200→48000) resample
+        // only existed to coerce a 512-sample buffer into a legal Opus frame size; it
+        // shipped 480 samples every 10.667 ms (haptic-gated cadence) = 45 kHz into the
+        // DS5's free-running 48 kHz DAC → ~6.25% underrun = the periodic gaps/crackle.
+        // SAMPLE_SIZE 60 + a 480-sample buffer put the whole 0x36 frame on a true
+        // 10 ms / 100 Hz grid: 100 × 480 = 48000 samples/s, matched, no gaps.
         static uint8_t out[200];
-        (void) opus_encode_float(encoder, out_buf, 480, out, 200);
+        int enc_ret = opus_encode_float(encoder, audio_element.data, 480, out, 200);
+        g_opus_last_ret = enc_ret;
+        g_opus_encodes++;
         critical_section_enter_blocking(&opus_cs);
         memcpy(opus_buf, out, 200);
         critical_section_exit(&opus_cs);
+        g_opus_ready = true;
     }
 }
