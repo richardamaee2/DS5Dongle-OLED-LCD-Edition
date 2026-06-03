@@ -8,9 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ## [Unreleased]
 
+---
+
+## [0.6.11-oled-edition] — 2026-06-02
+
+Headline: **adaptive triggers now actually work through the dongle** (#6) — host trigger force-feedback was being forwarded with its enable bits cleared, so the DualSense silently discarded it; this is the fix. Also adds an opt-in **`CtrlWake`** setting so the OLED can sleep while you play (#8/#9), persists the **OLED brightness** choice across power cycles (#9), and ships an in-progress **speaker-audio retiming** pass aimed at the periodic crackle (#7). UF2s attached to [the GitHub release](https://github.com/MarcelineVPQ/DS5Dongle-OLED-Edition/releases/tag/v0.6.11-oled-edition) (built by `.github/workflows/release.yml`).
+
 ### Added
 
 - **`CtrlWake` setting — let the OLED sleep while the controller is in use (issues #8, #9).** The idle power-ladder (dim → off) previously never fired during gameplay, because every controller input bumped the activity timer and kept the panel awake — so a configured dim/off timeout effectively did nothing while playing. New Settings item `CtrlWake` (default **on**, preserving the old behavior); set it **off** and controller input no longer wakes the screen — only the OLED's KEY0/KEY1 do — so the dim/off timers count down during play and the panel can sleep, requiring a button press to wake.
+
+### Changed
+
+- **Speaker audio path retimed onto a true 10 ms / 100 Hz grid (issue #7, experimental).** The old path resampled 512→480 samples and shipped a 480-sample Opus frame on the haptic-gated cadence (~every 10.667 ms ≈ 45 kHz into the DS5's free-running 48 kHz DAC), a ~6.25 % underrun that produced a periodic gap/crackle. The resampler is removed and the `0x36` frame now carries exactly one native 10 ms / 48 kHz Opus frame (`SAMPLE_SIZE` 64→60, 480-sample buffer), with the speaker sub-report offset computed from the haptic block length rather than hard-coded. This is an in-progress change aimed at the long-standing crackle; the audio path also carries debug counters (inert in the production UF2, visible only with `ENABLE_SERIAL`).
+- **`audio_buffer_length` now defaults to 16** (was 64) — a lower buffer avoids the DS5's periodic re-buffer gap. Existing saved configs keep their value; this only affects fresh flashes / Reset-to-defaults.
+- **`auto_haptics_enable` now defaults to Off** (was Fallback) — the speaker-derived rumble fallback could produce erratic haptics, so it is opt-in.
+- **OLED SPI flush is now chunked / non-blocking.** The framebuffer is sent in row-chunks across main-loop iterations instead of one ~1.1 ms blocking transfer, so the OLED no longer stalls `tud_task` / `audio_loop` / BTstack polling while it refreshes (the OLED-on side of the #7 audio distortion).
+- **Battery percentage shows the mid-point of each 10 % band** (5, 15, …, 95, 100 %), matching the kernel `hid-playstation` driver and Steam, instead of the band floor.
 
 ### Fixed
 
