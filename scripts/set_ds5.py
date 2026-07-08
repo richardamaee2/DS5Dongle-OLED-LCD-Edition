@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-DS5Dongle (OLED Edition) configuration tool.
+DS5Dongle (OLED Edition / 4-Player Edition) configuration tool.
 
 Reads and writes the firmware's persistent config over USB HID feature
 reports — no browser, no WebHID, works in any terminal. Ported from
 loteran/DS5Dongle's scripts/set_ds5.py and extended for this fork's
-Config_body layout (adds `config_version` at the start and `current_slot`
-between `controller_mode` and `auto_haptics_*`).
+Config_body layout.
+
+4-Player Edition additions:
+  --player {off,1,2,3,4}   per-dongle player identity (PS5-style player LEDs
+                           + player lightbar colour until the game overrides)
+  --pair-lock {on,off}     freeze the bonded-controller set (a locked dongle
+                           never pairs new controllers — multi-dongle etiquette)
+
+The script auto-detects the firmware's Config_body length (the firmware
+appends an 'RM'-tagged remap block right after the body in the 0xF7
+response), so it stays compatible with older firmwares — it just refuses
+to set fields the connected firmware doesn't have.
 
 Requires EITHER `cython-hidapi` (preferred — `pip install hidapi`) OR
-the `hid` package (`pip install hid`). The script auto-detects which is
-installed; both expose `hid.device` somewhere with slightly different
-constructor APIs, and we handle both.
+the `hid` package (`pip install hid`).
 
 Quick usage:
   scripts/set_ds5.py                       # print current config
+  scripts/set_ds5.py --player 2            # this dongle is Player 2
+  scripts/set_ds5.py --pair-lock on        # lock pairing after setup
   scripts/set_ds5.py --auto-haptics fallback --auto-haptics-gain 120
   scripts/set_ds5.py --haptics-gain 1.5 --speaker-volume -10
   scripts/set_ds5.py --slot 2              # switch active pairing slot
@@ -49,7 +59,12 @@ SONY_VID = 0x054C
 DS5_PID  = 0x0CE6
 DSE_PID  = 0x0DF2
 
-# Our Config_body wire layout — 19 bytes, little-endian, packed struct.
+# Config_body wire layouts (little-endian, packed struct), by firmware era:
+#   19 bytes — pre-lightbar (≤ v0.6.4)
+#   37 bytes — lightbar/screen/mic/brightness/ctrl-wake era (v0.6.5 … v0.6.12)
+#   39 bytes — 4-Player Edition (adds player_id + pair_lock at the end)
+#
+# Offsets (39-byte layout):
 #   uint8  config_version          [0]      (firmware-set, ignored on write)
 #   float  haptics_gain            [1:5]
 #   float  speaker_volume          [5:9]
@@ -59,13 +74,45 @@ DSE_PID  = 0x0DF2
 #   uint8  polling_rate_mode       [12]
 #   uint8  audio_buffer_length     [13]
 #   uint8  controller_mode         [14]
-#   uint8  current_slot            [15]      (fork-specific: multi-slot pairing)
-#   uint8  auto_haptics_enable     [16]      0=off 1=fallback 2=mix 3=replace
-#   uint8  auto_haptics_gain       [17]      [0..200] percent
-#   uint8  auto_haptics_lowpass    [18]      0=80Hz 1=160Hz 2=250Hz 3=400Hz
-CONFIG_FMT  = '<BffBBBBBBBBBB'
-CONFIG_SIZE = struct.calcsize(CONFIG_FMT)
-assert CONFIG_SIZE == 19, f"unexpected CONFIG_SIZE {CONFIG_SIZE}"
+#   uint8  current_slot            [15]
+#   uint8  auto_haptics_enable     [16]     0=off 1=fallback 2=mix 3=replace
+#   uint8  auto_haptics_gain       [17]     [0..200] percent
+#   uint8  auto_haptics_lowpass    [18]     0=80Hz 1=160Hz 2=250Hz 3=400Hz
+#   uint8  lightbar_mode           [19]     0=LIVE 1..4=FAV 5..7=effects 8=HOST
+#   uint8  lb_fav_r[4]             [20:24]
+#   uint8  lb_fav_g[4]             [24:28]
+#   uint8  lb_fav_b[4]             [28:32]
+#   uint8  screen_dim_timeout      [32]     minutes, 0=off
+#   uint8  screen_off_timeout      [33]     minutes, 0=off
+#   uint8  bt_mic_enable           [34]
+#   uint8  screen_brightness       [35]
+#   uint8  controller_wakes_disp   [36]
+#   uint8  player_id               [37]     0=off, 1..4  (4-Player Edition)
+#   uint8  pair_lock               [38]     0=open, 1=locked (4-Player Edition)
+FMT_19 = '<BffBBBBBBBBBB'
+FMT_37 = FMT_19 + 'B12BBBBBB'
+FMT_39 = FMT_37 + 'BB'
+assert struct.calcsize(FMT_19) == 19
+assert struct.calcsize(FMT_37) == 37
+assert struct.calcsize(FMT_39) == 39
+
+FIELDS_19 = [
+    'config_version',
+    'haptics_gain', 'speaker_volume',
+    'inactive_time', 'disable_inactive_disconnect', 'disable_pico_led',
+    'polling_rate_mode', 'audio_buffer_length', 'controller_mode',
+    'current_slot',
+    'auto_haptics_enable', 'auto_haptics_gain', 'auto_haptics_lowpass',
+]
+FIELDS_37 = FIELDS_19 + [
+    'lightbar_mode',
+    'lb_fav_0', 'lb_fav_1', 'lb_fav_2', 'lb_fav_3',
+    'lb_fav_4', 'lb_fav_5', 'lb_fav_6', 'lb_fav_7',
+    'lb_fav_8', 'lb_fav_9', 'lb_fav_10', 'lb_fav_11',
+    'screen_dim_timeout', 'screen_off_timeout',
+    'bt_mic_enable', 'screen_brightness', 'controller_wakes_display',
+]
+FIELDS_39 = FIELDS_37 + ['player_id', 'pair_lock']
 
 POLLING_MODES    = {0: "250 Hz", 1: "500 Hz", 2: "Real-time (1000 Hz)"}
 CONTROLLER_MODES = {0: "DS5", 1: "DSE (Edge)", 2: "Auto"}
@@ -76,6 +123,9 @@ AUTO_HAP_MODES   = {
     3: "Replace (audio-derived only, override native)",
 }
 LOWPASS_MODES = {0: "80 Hz", 1: "160 Hz", 2: "250 Hz", 3: "400 Hz"}
+LIGHTBAR_MODES = {0: "LIVE", 1: "FAV0", 2: "FAV1", 3: "FAV2", 4: "FAV3",
+                  5: "Breathing", 6: "Rainbow", 7: "Fade", 8: "HOST (passthrough)"}
+PLAYER_MODES = {0: "off", 1: "P1 (blue)", 2: "P2 (red)", 3: "P3 (green)", 4: "P4 (pink)"}
 
 
 def open_device():
@@ -94,52 +144,58 @@ def open_device():
     sys.exit(1)
 
 
+def detect_body_len(raw):
+    """raw = full 0xF7 response incl. report-id echo at [0].
+
+    The firmware appends a remap block ('R','M', proto, rev_lo, rev_hi,
+    16 table entries) directly after Config_body when the request leaves
+    room, so the marker position IS the body length. Validate the table
+    entries (< 16 or 0xFF) to avoid a false 'RM' inside config bytes."""
+    data = raw[1:]
+    for bl in range(19, min(len(data) - 20, 60) + 1):
+        if data[bl] == 0x52 and data[bl + 1] == 0x4D:  # 'R','M'
+            table = data[bl + 5: bl + 21]
+            if len(table) == 16 and all(v < 16 or v == 0xFF for v in table):
+                return bl
+    # No remap block (older firmware or short read): fall back to known sizes.
+    for bl in (39, 37, 19):
+        if len(data) >= bl:
+            return bl
+    return len(data)
+
+
 def get_config(device):
     raw = bytes(device.get_feature_report(0xF7, 64))
-    # raw[0] is the report ID echo; the actual Config_body starts at raw[1].
-    body = raw[1:1 + CONFIG_SIZE]
-    if len(body) < CONFIG_SIZE:
-        print(f"[ERROR] Config too short ({len(body)} bytes, expected {CONFIG_SIZE}). "
-              "Flash a newer firmware.", file=sys.stderr)
+    body_len = detect_body_len(raw)
+    body = raw[1:1 + body_len]
+
+    if body_len >= 39:
+        fmt, fields = FMT_39, FIELDS_39
+    elif body_len >= 37:
+        fmt, fields = FMT_37, FIELDS_37
+    elif body_len >= 19:
+        fmt, fields = FMT_19, FIELDS_19
+    else:
+        print(f"[ERROR] Config too short ({body_len} bytes). Flash a newer firmware.", file=sys.stderr)
         sys.exit(1)
-    (
-        config_version,
-        haptics_gain, speaker_volume,
-        inactive_time, disable_inactive_disconnect, disable_pico_led,
-        polling_rate_mode, audio_buffer_length, controller_mode,
-        current_slot,
-        auto_haptics_enable, auto_haptics_gain, auto_haptics_lowpass,
-    ) = struct.unpack(CONFIG_FMT, body)
-    return {
-        'config_version':              config_version,
-        'haptics_gain':                haptics_gain,
-        'speaker_volume':              speaker_volume,
-        'inactive_time':               inactive_time,
-        'disable_inactive_disconnect': disable_inactive_disconnect,
-        'disable_pico_led':            disable_pico_led,
-        'polling_rate_mode':           polling_rate_mode,
-        'audio_buffer_length':         audio_buffer_length,
-        'controller_mode':             controller_mode,
-        'current_slot':                current_slot,
-        'auto_haptics_enable':         auto_haptics_enable,
-        'auto_haptics_gain':           auto_haptics_gain,
-        'auto_haptics_lowpass':        auto_haptics_lowpass,
-    }
+
+    values = struct.unpack(fmt, body[:struct.calcsize(fmt)])
+    cfg = dict(zip(fields, values))
+    cfg['_body_len'] = body_len
+    return cfg
 
 
 def write_config(device, cfg):
-    body = struct.pack(
-        CONFIG_FMT,
-        cfg['config_version'] & 0xFF,
-        cfg['haptics_gain'], cfg['speaker_volume'],
-        cfg['inactive_time'] & 0xFF, cfg['disable_inactive_disconnect'] & 0xFF,
-        cfg['disable_pico_led'] & 0xFF,
-        cfg['polling_rate_mode'] & 0xFF, cfg['audio_buffer_length'] & 0xFF,
-        cfg['controller_mode'] & 0xFF,
-        cfg['current_slot'] & 0xFF,
-        cfg['auto_haptics_enable'] & 0xFF, cfg['auto_haptics_gain'] & 0xFF,
-        cfg['auto_haptics_lowpass'] & 0xFF,
-    )
+    body_len = cfg['_body_len']
+    if body_len >= 39:
+        fmt, fields = FMT_39, FIELDS_39
+    elif body_len >= 37:
+        fmt, fields = FMT_37, FIELDS_37
+    else:
+        fmt, fields = FMT_19, FIELDS_19
+    body = struct.pack(fmt, *[
+        (cfg[f] if isinstance(cfg[f], float) else int(cfg[f]) & 0xFF) for f in fields
+    ])
     # 0xF6 set protocol:  [0x01, ...body...] = update in-memory  →  [0x02] = persist to flash.
     device.send_feature_report(b'\xf6\x01' + body)
     device.send_feature_report(b'\xf6\x02')
@@ -159,31 +215,48 @@ def get_rssi(device):
 
 
 def fmt_cfg(c):
-    return (
-        f"  config_version     {c['config_version']}\n"
-        f"  haptics_gain       {c['haptics_gain']:.3f}\n"
-        f"  speaker_volume     {c['speaker_volume']:.1f} dB\n"
-        f"  inactive_time      {c['inactive_time']} min\n"
-        f"  inactive_disc      {'disabled' if c['disable_inactive_disconnect'] else 'enabled'}\n"
-        f"  pico_led           {'off' if c['disable_pico_led'] else 'on'}\n"
-        f"  polling_rate       {c['polling_rate_mode']} ({POLLING_MODES.get(c['polling_rate_mode'], '?')})\n"
-        f"  audio_buffer       {c['audio_buffer_length']}\n"
-        f"  controller_mode    {c['controller_mode']} ({CONTROLLER_MODES.get(c['controller_mode'], '?')})\n"
-        f"  current_slot       {c['current_slot']}\n"
-        f"  auto_haptics       {c['auto_haptics_enable']} ({AUTO_HAP_MODES.get(c['auto_haptics_enable'], '?')})\n"
-        f"  auto_haptics_gain  {c['auto_haptics_gain']}%\n"
-        f"  auto_haptics_lp    {c['auto_haptics_lowpass']} ({LOWPASS_MODES.get(c['auto_haptics_lowpass'], '?')})"
-    )
+    lines = [
+        f"  config_version     {c['config_version']}",
+        f"  haptics_gain       {c['haptics_gain']:.3f}",
+        f"  speaker_volume     {c['speaker_volume']:.1f} dB",
+        f"  inactive_time      {c['inactive_time']} min",
+        f"  inactive_disc      {'disabled' if c['disable_inactive_disconnect'] else 'enabled'}",
+        f"  pico_led           {'off' if c['disable_pico_led'] else 'on'}",
+        f"  polling_rate       {c['polling_rate_mode']} ({POLLING_MODES.get(c['polling_rate_mode'], '?')})",
+        f"  audio_buffer       {c['audio_buffer_length']}",
+        f"  controller_mode    {c['controller_mode']} ({CONTROLLER_MODES.get(c['controller_mode'], '?')})",
+        f"  current_slot       {c['current_slot']}",
+        f"  auto_haptics       {c['auto_haptics_enable']} ({AUTO_HAP_MODES.get(c['auto_haptics_enable'], '?')})",
+        f"  auto_haptics_gain  {c['auto_haptics_gain']}%",
+        f"  auto_haptics_lp    {c['auto_haptics_lowpass']} ({LOWPASS_MODES.get(c['auto_haptics_lowpass'], '?')})",
+    ]
+    if 'lightbar_mode' in c:
+        lines += [
+            f"  lightbar_mode      {c['lightbar_mode']} ({LIGHTBAR_MODES.get(c['lightbar_mode'], '?')})",
+            f"  screen_dim/off     {c['screen_dim_timeout']} / {c['screen_off_timeout']} min",
+            f"  bt_mic             {'on' if c['bt_mic_enable'] else 'off'}",
+            f"  screen_brightness  {c['screen_brightness']}",
+            f"  ctrl_wakes_display {'on' if c['controller_wakes_display'] else 'off'}",
+        ]
+    if 'player_id' in c:
+        lines += [
+            f"  player_id          {c['player_id']} ({PLAYER_MODES.get(c['player_id'], '?')})",
+            f"  pair_lock          {'locked' if c['pair_lock'] else 'open'}",
+        ]
+    else:
+        lines += ["  (player_id / pair_lock: firmware too old — flash the 4-Player Edition build)"]
+    return "\n".join(lines)
 
 
 AUTO_HAP_ARG = {'off': 0, 'fallback': 1, 'mix': 2, 'replace': 3}
 LOWPASS_ARG  = {'80': 0, '160': 1, '250': 2, '400': 3}
 CTRL_MODE_ARG = {'ds5': 0, 'dse': 1, 'auto': 2}
 POLL_ARG     = {'250': 0, '500': 1, 'realtime': 2, 'rt': 2}
+PLAYER_ARG   = {'off': 0, '1': 1, '2': 2, '3': 3, '4': 4}
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="DS5Dongle (OLED Edition) config tool.")
+    p = argparse.ArgumentParser(description="DS5Dongle (OLED / 4-Player Edition) config tool.")
     p.add_argument('--version', action='store_true', help="print firmware version and exit")
     p.add_argument('--rssi', action='store_true', help="print live BT RSSI (dBm) and exit")
     p.add_argument('--haptics-gain', type=float, help="float [1.0, 2.0]")
@@ -198,6 +271,10 @@ def build_parser():
     p.add_argument('--auto-haptics', choices=AUTO_HAP_ARG.keys(), help="Auto Haptics mode")
     p.add_argument('--auto-haptics-gain', type=int, help="percent [0, 200]")
     p.add_argument('--auto-haptics-lp', choices=LOWPASS_ARG.keys(), help="LP cutoff Hz")
+    p.add_argument('--player', choices=PLAYER_ARG.keys(),
+                   help="4-Player Edition: player identity for THIS dongle (off, 1-4)")
+    p.add_argument('--pair-lock', choices=['on', 'off'],
+                   help="4-Player Edition: lock pairing to the already-bonded controllers")
     return p
 
 
@@ -217,6 +294,10 @@ def main():
     changes = []
 
     def set_kv(key, val, label=None):
+        if key not in cfg:
+            print(f"[ERROR] Connected firmware has no '{label or key}' field — "
+                  "flash the 4-Player Edition build first.", file=sys.stderr)
+            sys.exit(1)
         if cfg[key] != val:
             changes.append(f"  {label or key}: {cfg[key]} → {val}")
             cfg[key] = val
@@ -236,6 +317,9 @@ def main():
     if args.auto_haptics is not None:    set_kv('auto_haptics_enable', AUTO_HAP_ARG[args.auto_haptics])
     if args.auto_haptics_gain is not None: set_kv('auto_haptics_gain', args.auto_haptics_gain)
     if args.auto_haptics_lp is not None: set_kv('auto_haptics_lowpass', LOWPASS_ARG[args.auto_haptics_lp])
+    if args.player is not None:          set_kv('player_id', PLAYER_ARG[args.player])
+    if args.pair_lock is not None:
+        set_kv('pair_lock', 1 if args.pair_lock == 'on' else 0)
 
     if changes:
         print("Updating config:")
