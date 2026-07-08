@@ -449,6 +449,7 @@ int main() {
         tud_task();
         audio_loop();
         interrupt_loop();
+        player_tick();
         oled_loop();
 #if ENABLE_BATT_LED
         battery_led_tick();

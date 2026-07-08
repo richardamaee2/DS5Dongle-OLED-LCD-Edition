@@ -54,6 +54,19 @@ struct __attribute__((packed)) Config_body {
     // preserves the original "any controller activity wakes the screen"
     // behavior. Issues #8 (dim timeout never fired during play) and #9.
     uint8_t controller_wakes_display;
+    // 4-Player Edition: per-dongle player identity, 0 = off (default), 1..4 =
+    // player number. When set, the dongle applies PS5-style defaults on connect
+    // — player-indicator LEDs P1..P4 and (while lightbar_mode is HOST) the PS5
+    // player colour (P1 blue / P2 red / P3 green / P4 pink). Host output
+    // reports override both the moment the game/OS claims the LEDs, exactly
+    // like a real console. Shown as a "P#" badge on the OLED Status screen.
+    uint8_t player_id;
+    // 4-Player Edition: pairing lock, 0 = open (default: an empty active slot
+    // accepts a new controller — preserves single-dongle behaviour), 1 = locked
+    // (only controllers already bonded to a slot may connect; the dongle never
+    // advertises for pairing). Set it on all four dongles after initial pairing
+    // so no dongle can grab a neighbour's controller.
+    uint8_t pair_lock;
 };
 
 struct __attribute__((packed)) Config {

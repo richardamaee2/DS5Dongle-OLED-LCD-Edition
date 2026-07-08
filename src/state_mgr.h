@@ -18,4 +18,14 @@ void state_update(const uint8_t *data, const uint8_t size);
 void state_set_led(uint8_t r, uint8_t g, uint8_t b);
 void state_get_led(uint8_t *r, uint8_t *g, uint8_t *b);
 
+// ---- 4-Player Edition: per-dongle player identity --------------------------
+// PS5-style connect defaults driven by config.player_id (0=off, 1..4): the
+// white player-indicator LEDs and, while lightbar_mode is HOST (passthrough),
+// the PS5 player colour. The host keeps full ownership — its own AllowLedColor
+// / AllowPlayerIndicators output reports override these defaults the moment
+// they arrive, exactly like a real console handing the LEDs to a game.
+void player_on_connect();   // called from bt.cpp when the HID interrupt channel opens
+void player_tick();         // called from main.cpp once per main-loop iteration
+void state_on_disconnect(); // called from bt.cpp on ACL disconnect
+
 #endif //DS5_BRIDGE_STATE_MGR_H

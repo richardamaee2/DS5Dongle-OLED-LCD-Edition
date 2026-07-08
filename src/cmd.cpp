@@ -281,6 +281,8 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
     if (buffer[0] == 0x01) {
         printf("[CMD] Enter config set func\n");
         set_config(buffer + 1, bufsize - 1);
+        // 4-Player Edition: pair_lock may have changed — refresh discoverability.
+        bt_pairing_posture_refresh();
     }
     if (buffer[0] == 0x02) {
         printf("[CMD] Enter config save func\n");

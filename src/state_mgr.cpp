@@ -7,6 +7,9 @@
 
 #include "utils.h"
 #include "state_mgr.h"
+#include "config.h"
+#include "bt.h"
+#include "pico/time.h"
 
 // Set by the OLED lightbar service (src/oled.cpp). While true, the firmware
 // owns the lightbar (an OLED mode or the charging pulse) and the host's
@@ -57,6 +60,104 @@ void state_get_led(uint8_t *r, uint8_t *g, uint8_t *b) {
     *r = state[offsetof(SetStateData, LedRed) + 0];
     *g = state[offsetof(SetStateData, LedRed) + 1];
     *b = state[offsetof(SetStateData, LedRed) + 2];
+}
+
+// ---- 4-Player Edition: per-dongle player identity --------------------------
+// When config.player_id is 1..4 the dongle applies PS5-style defaults at
+// connect time: the white player-indicator LEDs show the player number, and —
+// while lightbar_mode is HOST/passthrough — the lightbar shows the PS5 player
+// colour (P1 blue / P2 red / P3 green / P4 pink). Exactly like a console: the
+// moment the host/game claims the LEDs via an output report (AllowLedColor /
+// AllowPlayerIndicators), the host wins and the stamps stop.
+//
+// The DS5 ignores LED writes during its BT pair animation, so a connect-time
+// stamp alone can get swallowed. player_tick() therefore re-stamps and pushes
+// a 0x31 every 500 ms between 0.5 s and 4.5 s after connect (skipped while the
+// speaker stream is active — state[] already rides every 0x36 audio frame on
+// the load-bearing audio path, which must not be intruded on).
+
+extern int reportSeqCounter; // main.cpp — shared BT 0x31 sequence counter
+extern bool spk_active;      // main.cpp — true while the USB speaker stream is open
+
+static bool g_host_led_claimed = false;
+static bool g_host_player_claimed = false;
+static absolute_time_t g_player_connect_time = 0;
+static absolute_time_t g_player_last_push = 0;
+static bool g_player_assert_pending = false;
+
+// Player-indicator bitmasks per Linux hid-playstation / SDL (P1..P4).
+static constexpr uint8_t kPlayerLedMask[4] = {0x04, 0x0A, 0x15, 0x1B};
+// PS5 player colours: P1 blue, P2 red, P3 green, P4 pink.
+static constexpr uint8_t kPlayerColor[4][3] = {
+    {0, 0, 255},
+    {255, 0, 0},
+    {0, 255, 0},
+    {255, 0, 128},
+};
+// Keep in sync with kLbModeHost in src/oled.cpp (documented in config.h).
+constexpr uint8_t kLightbarModeHost = 8;
+
+static void player_stamp() {
+    const uint8_t pid = get_config().player_id;
+    if (pid < 1 || pid > 4) return;
+    if (!g_host_player_claimed) {
+        // PlayerLightFade (bit 5) left 0 = LEDs fade in, like a console slot assign.
+        state[kPlayerIndicatorsOffset] = kPlayerLedMask[pid - 1];
+    }
+    if (!g_host_led_claimed && !g_lightbar_override
+        && get_config().lightbar_mode == kLightbarModeHost) {
+        state_set_led(kPlayerColor[pid - 1][0], kPlayerColor[pid - 1][1], kPlayerColor[pid - 1][2]);
+    }
+}
+
+void player_on_connect() {
+    g_host_led_claimed = false;
+    g_host_player_claimed = false;
+    g_player_connect_time = get_absolute_time();
+    g_player_last_push = 0;
+    const uint8_t pid = get_config().player_id;
+    g_player_assert_pending = (pid >= 1 && pid <= 4);
+    if (g_player_assert_pending) player_stamp();
+}
+
+void state_on_disconnect() {
+    g_player_assert_pending = false;
+    g_host_led_claimed = false;
+    g_host_player_claimed = false;
+}
+
+void player_tick() {
+    if (!g_player_assert_pending) return;
+    if (!bt_is_connected()) {
+        g_player_assert_pending = false;
+        return;
+    }
+    const absolute_time_t now = get_absolute_time();
+    const int64_t since_connect = absolute_time_diff_us(g_player_connect_time, now);
+    // Past 4.5 s the pair animation is over and the stamped state[] rides
+    // every subsequent host/audio frame on its own — stop.
+    if (since_connect > 4500 * 1000) {
+        g_player_assert_pending = false;
+        return;
+    }
+    if (since_connect < 500 * 1000) return; // let the connect-time init packet land first
+    if (g_player_last_push != 0
+        && absolute_time_diff_us(g_player_last_push, now) < 500 * 1000) {
+        return;
+    }
+    g_player_last_push = now;
+
+    player_stamp();
+    if (spk_active) return; // state[] rides the 0x36 audio frames while streaming
+    uint8_t outputData[78]{};
+    outputData[0] = 0x31;
+    outputData[1] = reportSeqCounter << 4;
+    if (++reportSeqCounter == 256) {
+        reportSeqCounter = 0;
+    }
+    outputData[2] = 0x10;
+    state_set(outputData + 3, sizeof(SetStateData));
+    bt_write(outputData, sizeof(outputData));
 }
 
 void state_update(const uint8_t *data, const uint8_t size) {
@@ -169,4 +270,13 @@ void state_update(const uint8_t *data, const uint8_t size) {
         offsetof(SetStateData, LedRed),
         sizeof(update.LedRed) * 3
     );
+
+    // 4-Player Edition: once the host claims the LEDs, the player-identity
+    // defaults yield permanently (until the next connect) — console semantics.
+    if (update.AllowPlayerIndicators) {
+        g_host_player_claimed = true;
+    }
+    if (update.AllowLedColor && !g_lightbar_override) {
+        g_host_led_claimed = true;
+    }
 }

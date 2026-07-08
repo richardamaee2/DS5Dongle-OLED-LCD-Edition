@@ -126,7 +126,7 @@ constexpr int kLbModeHost = 8;
 constexpr int kNumLbModes = 9;
 
 // Settings screen state
-constexpr int kNumSettingsItems = 17; // 8 fields + 3 auto-haptic + 2 screen-timeout + BT mic + Ctrl-wake + Reset + Wipe
+constexpr int kNumSettingsItems = 19; // 8 fields + 3 auto-haptic + 2 screen-timeout + BT mic + Ctrl-wake + Player + PairLock + Reset + Wipe
 constexpr int kSettingsAutoHapEnaIdx  = 8;
 constexpr int kSettingsAutoHapGainIdx = 9;
 constexpr int kSettingsAutoHapLpIdx   = 10;
@@ -134,8 +134,8 @@ constexpr int kSettingsScrDimIdx      = 11;
 constexpr int kSettingsScrOffIdx      = 12;
 constexpr int kSettingsBtMicIdx       = 13;
 constexpr int kSettingsCtrlWakeIdx    = 14;
-constexpr int kSettingsResetIdx       = 15;
-constexpr int kSettingsWipeSlotsIdx   = 16;
+constexpr int kSettingsResetIdx       = 17;
+constexpr int kSettingsWipeSlotsIdx   = 18;
 Config_body settings_local{};
 int settings_sel = 0;
 bool settings_dirty = false;
@@ -691,6 +691,13 @@ __attribute__((noinline)) void render_screen() {
     // "dev" so a non-tagged build is visible at a glance.
     draw_text(kContentX, 0, "DS5 Bridge " FIRMWARE_VERSION);
     draw_icon(120, 0, connected ? kIconLinkOn : kIconLinkOff, 8, 8);
+
+    // 4-Player Edition: per-dongle player badge (config.player_id 1..4).
+    if (get_config().player_id >= 1 && get_config().player_id <= 4) {
+        char pbadge[4];
+        snprintf(pbadge, sizeof(pbadge), "P%u", get_config().player_id);
+        draw_text(110, 9, pbadge);
+    }
 
     if (connected) {
         uint8_t a[6];
@@ -1557,6 +1564,13 @@ void settings_adjust(int delta) {
         }
         case 13: c.bt_mic_enable ^= 1; break; // BT mic on/off
         case 14: c.controller_wakes_display ^= 1; break; // controller activity wakes OLED on/off
+        case 15: { // player_id 0 (off) .. 4, wraps (4-Player Edition)
+            int v = (int)c.player_id + delta;
+            if (v < 0) v = 4; if (v > 4) v = 0;
+            c.player_id = (uint8_t)v;
+            break;
+        }
+        case 16: c.pair_lock ^= 1; break; // pairing lock on/off (4-Player Edition)
     }
 }
 
@@ -1592,6 +1606,7 @@ void settings_handle_input() {
             if (config_save()) {
                 settings_local = get_config();
                 lightbar_load_config(); // refresh RAM lightbar state (no reboot here)
+                bt_pairing_posture_refresh(); // 4-Player Edition: defaults unlock pairing
                 settings_dirty = false;
                 settings_save_status = "Reset!";
             } else {
@@ -1605,6 +1620,7 @@ void settings_handle_input() {
     if (!tri_now && tri_prev) {
         if (!is_hold_item && !settings_reset_triggered) {
             set_config(settings_local);
+            bt_pairing_posture_refresh(); // 4-Player Edition: apply pair_lock immediately
             settings_save_status = config_save() ? "Saved!" : "Save FAIL";
             if (settings_save_status[0] == 'S' && settings_save_status[1] == 'a') {
                 settings_dirty = false;
@@ -1660,8 +1676,13 @@ __attribute__((noinline)) void format_settings_item(int idx, char* line, size_t 
             break;
         case 13: snprintf(line, n, "%s BT Mic %s", cur, c.bt_mic_enable ? "on" : "off"); break;
         case 14: snprintf(line, n, "%s CtrlWake %s", cur, c.controller_wakes_display ? "on" : "off"); break;
-        case 15: snprintf(line, n, "%s Reset to defaults", cur); break;
-        case 16: snprintf(line, n, "%s Wipe all slots", cur); break;
+        case 15:
+            if (c.player_id == 0) snprintf(line, n, "%s Player off", cur);
+            else snprintf(line, n, "%s Player P%u", cur, c.player_id);
+            break;
+        case 16: snprintf(line, n, "%s PairLock %s", cur, c.pair_lock ? "on" : "off"); break;
+        case 17: snprintf(line, n, "%s Reset to defaults", cur); break;
+        case 18: snprintf(line, n, "%s Wipe all slots", cur); break;
     }
 }
 

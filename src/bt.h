@@ -39,6 +39,11 @@ bool bt_is_connected();
 void bt_get_addr(uint8_t out[6]);
 uint32_t bt_hci_err_count();
 
+// 4-Player Edition: re-evaluate pairing posture (discoverability) after a
+// config change — pair_lock can be edited at runtime via the OLED Settings
+// screen or the 0xF6 config report.
+void bt_pairing_posture_refresh();
+
 // Multi-slot persistent pairing (Phase G). Modeled on zurce/DS5Dongle-OLED.
 int  bt_get_slot();
 void bt_set_slot(int slot);

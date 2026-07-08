@@ -78,11 +78,20 @@ bool bt_disconnect();  // fwd decl — defined further down
 // initial setup + partial-wipe states). Once all 4 slots are full, go
 // non-discoverable so a stray phone can't try to pair.
 static void update_discoverable() {
-    if (slots_any_empty()) {
+    // 4-Player Edition: pair_lock freezes the bonded-controller set — the
+    // dongle never advertises for new pairings while locked, even with empty
+    // slots. Bonded controllers reconnect as usual (page scan is untouched).
+    if (slots_any_empty() && !get_config().pair_lock) {
         gap_discoverable_control(1);
     } else {
         gap_discoverable_control(0);
     }
+}
+
+// Re-evaluate pairing posture after a runtime config change (pair_lock edited
+// via the OLED Settings screen or the 0xF6 config report).
+void bt_pairing_posture_refresh() {
+    update_discoverable();
 }
 
 void bt_register_data_callback(bt_data_callback_t callback) {
@@ -328,6 +337,13 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
                         break;
                     }
                 }
+                // 4-Player Edition: pair_lock blocks auto-pairing an unknown
+                // controller into an empty slot (multi-dongle etiquette — a
+                // locked dongle can never grab a neighbour's controller).
+                if (!slot_occupied(g_current_slot) && get_config().pair_lock) {
+                    printf("[HCI] pair_lock on, ignore new gamepad %s\n", bd_addr_to_str(addr));
+                    break;
+                }
                 printf("[HCI] Gamepad found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
                 bd_addr_copy(current_device_addr, addr);
                 device_found = true;
@@ -486,6 +502,15 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             const uint32_t cod = hci_event_connection_request_get_class_of_device(packet);
             printf("[HCI] Incoming ACL request from %s cod=0x%06x\n", bd_addr_to_str(addr), (unsigned int) cod);
             if ((cod & 0x000F00) == 0x000500) {
+                // 4-Player Edition: while pair_lock is on, only controllers
+                // already bonded to one of this dongle's slots may connect.
+                // (A foreign DS5 only pages us on a stale/foreign bond — e.g.
+                // our slots were wiped while it still remembers us.)
+                if (get_config().pair_lock && slot_owner_of(addr) < 0) {
+                    printf("[HCI] pair_lock on, reject unknown %s\n", bd_addr_to_str(addr));
+                    hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
+                    break;
+                }
                 bd_addr_copy(current_device_addr, addr);
                 gap_inquiry_stop();
                 hci_send_cmd(&hci_accept_connection_request, addr, 0x01);
@@ -509,6 +534,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *p
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
             feature_data.clear();
+            state_on_disconnect(); // 4-Player Edition: drop host LED claims + player re-assert
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 #if ENABLE_BATT_LED
             battery_led_on_disconnect();
@@ -627,6 +653,9 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
                     printf("Init DualSense\n");
 
                     init_feature();
+                    // 4-Player Edition: stamp the player LEDs / colour into
+                    // state[] so the init packet below carries them.
+                    player_on_connect();
                     // 初始化手柄状态
                     uint8_t report32[142]{};
                     report32[0] = 0x32;
