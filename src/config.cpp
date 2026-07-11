@@ -68,8 +68,12 @@ void config_valid() {
         printf("[Config] disable_pico_led is invalid\n");
     }
     if (body->polling_rate_mode > 2) {
-        body->polling_rate_mode = 0;
-        printf("[Config] polling_rate_mode is invalid\n");
+        // Personal-fork default: real-time / 1 kHz. Minimum input lag out of
+        // the box on a fresh flash or factory reset; an explicitly saved 0/1
+        // still sticks. The endpoint bInterval is patched at enumeration
+        // (usb_descriptors.cpp), so changing this needs a USB replug to bite.
+        body->polling_rate_mode = 2;
+        printf("[Config] polling_rate_mode is invalid, defaulting to 2 (real-time)\n");
     }
     if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {
         body->audio_buffer_length = 64;

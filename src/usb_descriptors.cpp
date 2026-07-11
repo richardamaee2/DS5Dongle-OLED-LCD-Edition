@@ -397,6 +397,13 @@ uint8_t descriptor_configuration[] = {
 #endif
 };
 
+// Poll mode this callback last patched into the endpoint descriptors — i.e.
+// what the host actually enumerated with, as opposed to what the config says
+// now. Read via src/latency.h so the Latency screen can flag "config changed,
+// replug USB". 0xFF until the first enumeration. Records a value only; no
+// descriptor byte is affected.
+uint8_t g_usb_active_poll_mode = 0xFF;
+
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
@@ -414,6 +421,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
             bInterval = 0x01;
             break;
     }
+    g_usb_active_poll_mode = get_config().polling_rate_mode;
     constexpr auto offset = CONFIG_DESC_LEN_BASE;
     descriptor_configuration[offset - 1] = bInterval;
     descriptor_configuration[offset - 8] = bInterval;
