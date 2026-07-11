@@ -12,6 +12,7 @@
 #include "bt.h"
 #include "config.h"
 #include "device/usbd.h"
+#include "latency.h"
 #include "pico/time.h"
 #include "slots.h"
 #include "remap.h"
@@ -223,7 +224,22 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
         //   [32..35] uint32  host 0x02 OUT reports received total
         //   [36..39] uint32  ...of those, with Allow*TriggerFFB set
         //   [40..43] uint32  ...forwarded as BT 0x31 sub-0x10
-        constexpr uint16_t want = 44;
+        // Section 3: latency telemetry (host-side twin of the Latency screen;
+        // fields mirror src/latency.h — reqlen-guarded, so old 44-byte readers
+        // like mic_diag.sh bt-trace keep working unchanged).
+        //   [44]     uint8   configured polling_rate_mode (0=250Hz 1=500Hz 2=RT)
+        //   [45]     uint8   poll mode patched at last USB enumeration (0xFF = pre-enum)
+        //   [46..47] uint16  BT input reports/s
+        //   [48..49] uint16  USB input reports/s accepted by TinyUSB
+        //   [50..53] uint32  dongle transit avg us (1 s window)
+        //   [54..57] uint32  dongle transit max us (1 s window)
+        //   [58..61] uint32  dongle transit peak us since boot
+        //   [62..65] uint32  BT inter-report gap min us (window)
+        //   [66..69] uint32  BT inter-report gap max us (window)
+        //   [70..73] uint32  worst display-path blocking us since boot
+        //   [74]     uint8   display variant: 0 = OLED (SH1107), 1 = LCD (ST7789)
+        //   [75]     uint8   reserved (0)
+        constexpr uint16_t want = 76;
         for (uint16_t i = 0; i < want && i < reqlen; i++) buffer[i] = 0;
 
         const uint32_t bt31    = g_bt_31_packets;
@@ -248,6 +264,31 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
         if ((32 + 4) <= reqlen) memcpy(buffer + 32, &out02,   4);
         if ((36 + 4) <= reqlen) memcpy(buffer + 36, &out02_t, 4);
         if ((40 + 4) <= reqlen) memcpy(buffer + 40, &out02_b, 4);
+
+        // Section 3 — assembled locally, then copied under the same
+        // reqlen guard as everything above.
+        LatencyStats ls{};
+        latency_get(&ls);
+        uint8_t lat[32] = {0};
+        lat[0] = get_config().polling_rate_mode;
+        lat[1] = g_usb_active_poll_mode;
+        const uint16_t btr = (uint16_t)(ls.bt_rate  > 0xFFFF ? 0xFFFF : ls.bt_rate);
+        const uint16_t usr = (uint16_t)(ls.usb_rate > 0xFFFF ? 0xFFFF : ls.usb_rate);
+        memcpy(lat + 2,  &btr, 2);
+        memcpy(lat + 4,  &usr, 2);
+        memcpy(lat + 6,  &ls.transit_avg_us,  4);
+        memcpy(lat + 10, &ls.transit_max_us,  4);
+        memcpy(lat + 14, &ls.transit_peak_us, 4);
+        memcpy(lat + 18, &ls.bt_gap_min_us,   4);
+        memcpy(lat + 22, &ls.bt_gap_max_us,   4);
+        const uint32_t disp_busy = latency_display_busy_max_us();
+        memcpy(lat + 26, &disp_busy, 4);
+#ifdef DISPLAY_LCD13
+        lat[30] = 1;
+#else
+        lat[30] = 0;
+#endif
+        for (int i = 0; i < 32 && (44 + i) < reqlen; i++) buffer[44 + i] = lat[i];
         return (reqlen < want) ? reqlen : want;
     }
     if (report_id == 0xfe) {

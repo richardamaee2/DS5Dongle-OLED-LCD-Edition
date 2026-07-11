@@ -83,6 +83,82 @@ uint32_t host_out02_trig_allow()  { return g_host_out02_trig_allow; }
 uint32_t host_out02_to_bt()       { return g_host_out02_to_bt; }
 uint32_t host_out02_trig_folded() { return g_host_out02_trig_folded; }
 
+// ---- Latency telemetry (src/latency.h) -------------------------------------
+// Dongle transit = BT input-report arrival (on_bt_data 0x31 accept) →
+// tud_hid_report() accepted in interrupt_loop(). Accumulated inline with a
+// couple of timestamps; averaged/published only from latency_get() at display
+// rate. Samples over 1 s (idle gaps, connect pauses) are discarded so a pause
+// can't masquerade as transit latency. All core-0 cooperative — plain globals.
+#include "latency.h"
+namespace {
+uint32_t lat_arrival_us = 0;              // arrival ts of interrupt_in_data content
+uint32_t lat_prev_arrival_us = 0;         // previous arrival (inter-packet gap)
+uint32_t lat_win_start_us = 0;            // 1 s accumulation window start
+uint32_t lat_sum_us = 0, lat_cnt = 0;     // transit sum/count, current window
+uint32_t lat_max_us = 0;                  // transit max, current window
+uint32_t lat_peak_us = 0;                 // transit max since boot
+uint32_t lat_bt_cnt = 0;                  // BT arrivals, current window
+uint32_t lat_gap_min_us = 0xFFFFFFFFu;    // BT inter-arrival min, current window
+uint32_t lat_gap_max_us = 0;              // BT inter-arrival max, current window
+LatencyStats lat_pub{};                   // last published window
+uint32_t lat_disp_busy_max_us = 0;        // worst display-path blocking since boot
+constexpr uint32_t kLatSaneUs = 1000000;  // ignore samples/gaps longer than 1 s
+
+// Hot path (on_bt_data): one timer read + a handful of integer ops.
+inline void lat_note_bt_arrival(uint32_t now) {
+    if (lat_prev_arrival_us != 0) {
+        const uint32_t gap = now - lat_prev_arrival_us;
+        if (gap < kLatSaneUs) {
+            if (gap < lat_gap_min_us) lat_gap_min_us = gap;
+            if (gap > lat_gap_max_us) lat_gap_max_us = gap;
+        }
+    }
+    lat_prev_arrival_us = now;
+    lat_arrival_us = now;
+    lat_bt_cnt++;
+}
+
+// Hot path (interrupt_loop, accepted send): one timer read + a few ops.
+inline void lat_note_usb_send(uint32_t arrival_us) {
+    const uint32_t transit = time_us_32() - arrival_us;
+    if (transit < kLatSaneUs) {
+        lat_sum_us += transit;
+        lat_cnt++;
+        if (transit > lat_max_us)  lat_max_us  = transit;
+        if (transit > lat_peak_us) lat_peak_us = transit;
+    }
+}
+} // namespace
+
+// Cold path: called at display / feature-report rate (~10 Hz). Rolls the 1 s
+// window over when due; divides exactly once per window.
+void latency_get(LatencyStats *out) {
+    const uint32_t now = time_us_32();
+    if (lat_win_start_us == 0) lat_win_start_us = now;
+    const uint32_t elapsed = now - lat_win_start_us;
+    if (elapsed >= 1000000u) {
+        // Scale counts to per-second even if the getter ran late (e.g. panel
+        // dimmed and the only reader was a slow 0xFD poll).
+        const uint64_t el = elapsed;
+        lat_pub.transit_avg_us = lat_cnt ? (lat_sum_us / lat_cnt) : 0;
+        lat_pub.transit_max_us = lat_max_us;
+        lat_pub.bt_rate        = (uint32_t)(((uint64_t)lat_bt_cnt * 1000000u) / el);
+        lat_pub.usb_rate       = (uint32_t)(((uint64_t)lat_cnt    * 1000000u) / el);
+        lat_pub.bt_gap_min_us  = (lat_gap_min_us == 0xFFFFFFFFu) ? 0 : lat_gap_min_us;
+        lat_pub.bt_gap_max_us  = lat_gap_max_us;
+        lat_sum_us = 0; lat_cnt = 0; lat_max_us = 0; lat_bt_cnt = 0;
+        lat_gap_min_us = 0xFFFFFFFFu; lat_gap_max_us = 0;
+        lat_win_start_us = now;
+    }
+    lat_pub.transit_peak_us = lat_peak_us;
+    *out = lat_pub;
+}
+
+void latency_note_display_busy(uint32_t us) {
+    if (us > lat_disp_busy_max_us) lat_disp_busy_max_us = us;
+}
+uint32_t latency_display_busy_max_us() { return lat_disp_busy_max_us; }
+
 uint8_t interrupt_in_data[63] = {
     0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7,
     0x08, 0x00, 0x00, 0x00, 0x52, 0x43, 0x30, 0x41,
@@ -126,18 +202,27 @@ void interrupt_loop() {
         remap_apply(out);
         if (!tud_hid_report(0x01, out, 63)) {
             printf("[USBHID] tud_hid_report error\n");
+        } else if (lat_arrival_us != 0) {
+            // 250/500 Hz modes resend the latest snapshot every poll; transit
+            // here = age of the data on the wire, which is exactly what the
+            // Latency screen should show for the slower polling modes.
+            lat_note_usb_send(lat_arrival_us);
         }
         return;
     }
 
     bool should_send = false;
-    // Local buffer to hold the report data while we prepare it to send. 
+    // Local buffer to hold the report data while we prepare it to send.
     uint8_t safe_report[63];
 
+    // Arrival timestamp of the snapshot we are about to send — grabbed inside
+    // the critical section so it can't be paired with a newer report's data.
+    uint32_t snap_arrival_us = 0;
 
     critical_section_enter_blocking(&report_cs);
     if (report_dirty) {
         memcpy(safe_report, interrupt_in_data, 63);
+        snap_arrival_us = lat_arrival_us;
         report_dirty = false;
         should_send = true;
     }
@@ -151,11 +236,15 @@ void interrupt_loop() {
         if (!tud_hid_report(0x01, safe_report, 63)) {
             printf("[USBHID] tud_hid_report error\n");
 
-            // If the report failed to queue, restore the dirty flag 
+            // If the report failed to queue, restore the dirty flag
             // so we try again on the next loop iteration.
             critical_section_enter_blocking(&report_cs);
             report_dirty = true;
             critical_section_exit(&report_cs);
+        } else if (snap_arrival_us != 0) {
+            // Accepted by TinyUSB — this is the "handed to the USB endpoint"
+            // moment the dongle-transit measurement is defined against.
+            lat_note_usb_send(snap_arrival_us);
         }
     }
 }
@@ -224,6 +313,7 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
 
         if (get_config().polling_rate_mode != 2) {
             memcpy(interrupt_in_data, data + 3, 63);
+            lat_note_bt_arrival(time_us_32());
 #if ENABLE_BATT_LED
             battery_led_note_report();
 #endif
@@ -234,6 +324,7 @@ void on_bt_data(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
         memcpy(interrupt_in_data, data + 3, 63);
         report_dirty = true;
         critical_section_exit(&report_cs);
+        lat_note_bt_arrival(time_us_32());
 #if ENABLE_BATT_LED
         battery_led_note_report();
 #endif

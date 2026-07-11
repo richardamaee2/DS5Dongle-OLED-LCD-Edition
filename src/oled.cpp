@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "config.h"
 #include "state_mgr.h"
+#include "latency.h"
 
 #include <cstdio>
 #include <cstring>
@@ -111,11 +112,12 @@ constexpr int kScreenTriggers  = 3;
 constexpr int kScreenGyro      = 4;
 constexpr int kScreenTouchpad  = 5;
 constexpr int kScreenDiag      = 6;
-constexpr int kScreenCpu       = 7;
-constexpr int kScreenRssi      = 8;
-constexpr int kScreenVU        = 9;
-constexpr int kScreenSettings  = 10;
-constexpr int kNumScreens      = 11;
+constexpr int kScreenLatency   = 7;
+constexpr int kScreenCpu       = 8;
+constexpr int kScreenRssi      = 9;
+constexpr int kScreenVU        = 10;
+constexpr int kScreenSettings  = 11;
+constexpr int kNumScreens      = 12;
 int current_screen = 0;
 
 // Lightbar mode cycle: 0=LIVE, 1-4=FAV0-3, 5=BREATHING, 6=RAINBOW, 7=FADE,
@@ -969,6 +971,52 @@ __attribute__((noinline)) void render_screen_diag() {
     if (diag_scroll > 0)                       draw_text(120, 9,  "^");
     if (diag_scroll + kVisible < kNumDiagRows) draw_text(120, 45, "v");
 
+    flush_fb();
+}
+
+// Read-only latency telemetry (src/latency.h): configured vs enumerated USB
+// polling mode, measured BT-in / USB-out report rates, dongle transit
+// (BT arrival â USB accept) rolling avg/max + boot peak, BT inter-packet
+// jitter, and the display path's own worst blocking time. All numbers come
+// from main.cpp's 1 s accumulation windows â latency_get() is the only call
+// this screen makes, so rendering it adds nothing to the input path.
+__attribute__((noinline)) void render_screen_latency() {
+    fb_clear();
+    draw_text(kContentX, 0, "Latency");
+
+    LatencyStats ls{};
+    latency_get(&ls);
+
+    const uint8_t cfg_mode = get_config().polling_rate_mode % 3;
+    static const char* const kPollNames[3] = {"250Hz", "500Hz", "1kHz"};
+    char buf[24];
+    snprintf(buf, sizeof(buf), "[%s]", kPollNames[cfg_mode]);
+    draw_text(92, 0, buf);
+
+    snprintf(buf, sizeof(buf), "BT in : %lu/s", (unsigned long)ls.bt_rate);
+    draw_text(kContentX, 9, buf);
+    snprintf(buf, sizeof(buf), "USBout: %lu/s", (unsigned long)ls.usb_rate);
+    draw_text(kContentX, 18, buf);
+    // Dongle transit: BT arrival -> accepted by the USB endpoint. avg/max of
+    // the last 1 s window; Peak holds the worst case since boot.
+    snprintf(buf, sizeof(buf), "Trans %lu/%luus",
+             (unsigned long)ls.transit_avg_us, (unsigned long)ls.transit_max_us);
+    draw_text(kContentX, 27, buf);
+    snprintf(buf, sizeof(buf), "Peak  : %luus", (unsigned long)ls.transit_peak_us);
+    draw_text(kContentX, 36, buf);
+    snprintf(buf, sizeof(buf), "BT gap: %lu-%luus",
+             (unsigned long)ls.bt_gap_min_us, (unsigned long)ls.bt_gap_max_us);
+    draw_text(kContentX, 45, buf);
+
+    // Footer: the replug warning wins over the display-budget readout â a
+    // stale bInterval invalidates every number a latency hunt cares about.
+    if (g_usb_active_poll_mode != 0xFF && g_usb_active_poll_mode != cfg_mode) {
+        draw_text(kContentX, 56, "Poll chg: replug USB");
+    } else {
+        snprintf(buf, sizeof(buf), "Disp busy max %luus",
+                 (unsigned long)latency_display_busy_max_us());
+        draw_text(kContentX, 56, buf);
+    }
     flush_fb();
 }
 
@@ -1958,7 +2006,9 @@ void oled_loop() {
     if (dim_enabled && idle > dim_us) {
         sh1107_set_contrast(kDimContrast);
         oled_power_state = OLED_DIM;
+        const uint32_t disp_t0 = time_us_32();
         render_dim_pulse((uint32_t)(idle - dim_us));
+        latency_note_display_busy(time_us_32() - disp_t0);
         return; // skip the regular per-screen render path
     }
     sh1107_set_contrast(kBrightLevels[bright_idx]);
@@ -1991,6 +2041,11 @@ void oled_loop() {
 
     last_rendered_screen = current_screen;
 
+    // Time the whole render+flush pass. This is the display path's blocking
+    // contribution to the main loop â the budget number the LCD build must
+    // stay within (Latency screen footer / 0xFD bytes [70..73]). Two timer
+    // reads at ~10 Hz; costs nothing when no render is due.
+    const uint32_t disp_t0 = time_us_32();
     switch (current_screen) {
         case kScreenStatus:   render_screen();           break;
         case kScreenSlots:    render_screen_slots();     break;
@@ -1999,9 +2054,11 @@ void oled_loop() {
         case kScreenGyro:     render_screen_gyro();      break;
         case kScreenTouchpad: render_screen_touchpad();  break;
         case kScreenDiag:     render_screen_diag();      break;
+        case kScreenLatency:  render_screen_latency();   break;
         case kScreenCpu:      render_screen_cpu(screen_entered); break;
         case kScreenRssi:     render_screen_rssi();      break;
         case kScreenVU:       render_screen_vu();        break;
         case kScreenSettings: render_screen_settings();  break;
     }
+    latency_note_display_busy(time_us_32() - disp_t0);
 }

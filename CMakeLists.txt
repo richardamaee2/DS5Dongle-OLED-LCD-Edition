@@ -67,6 +67,20 @@ else ()
         set(SYS_CLOCK_KHZ_VALUE 320000)
 endif ()
 
+# Compile-time display selection. Exactly ONE display backend is compiled in;
+# both export the same oled_init()/oled_loop() API (src/oled.h), so nothing
+# outside the display layer changes.
+#   OFF (default) -> src/oled.cpp  Waveshare Pico-OLED-1.3 (SH1107, 128x64 mono)
+#   ON            -> src/lcd.cpp   Waveshare Pico-LCD-1.3  (ST7789VW, 240x240 colour)
+option(DISPLAY_LCD13 "Target the Waveshare Pico-LCD-1.3 (ST7789VW 240x240 colour IPS) instead of the Pico-OLED-1.3" OFF)
+if (DISPLAY_LCD13)
+        set(DISPLAY_SOURCE src/lcd.cpp)
+        set(OUTPUT_BASENAME "ds5-bridge-lcd13")
+else ()
+        set(DISPLAY_SOURCE src/oled.cpp)
+        set(OUTPUT_BASENAME "ds5-bridge-oled")
+endif ()
+
 
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -88,7 +102,7 @@ add_executable(ds5-bridge
         src/config.cpp
         src/cmd.cpp
         src/state_mgr.cpp
-        src/oled.cpp
+        ${DISPLAY_SOURCE}
         src/slots.cpp
         src/remap.cpp
 )
@@ -155,8 +169,8 @@ target_compile_definitions(ds5-bridge PRIVATE
         FIRMWARE_VERSION="${VERSION}"
 )
 
-set_target_properties(ds5-bridge PROPERTIES OUTPUT_NAME "ds5-bridge-oled")
-pico_set_program_name(ds5-bridge "ds5-bridge-oled")
+set_target_properties(ds5-bridge PROPERTIES OUTPUT_NAME "${OUTPUT_BASENAME}")
+pico_set_program_name(ds5-bridge "${OUTPUT_BASENAME}")
 pico_set_program_version(ds5-bridge "${VERSION}")
 
 # Modify the below lines to enable/disable output over UART/USB
@@ -190,6 +204,19 @@ target_link_libraries(ds5-bridge
         wdl_resampler
         opus
 )
+
+# LCD backend extras: background framebuffer DMA + backlight PWM. Linked (and
+# the DISPLAY_LCD13 macro defined, used by src/cmd.cpp's 0xFD variant byte)
+# only for the LCD build so the OLED binary stays byte-for-byte unaffected.
+if (DISPLAY_LCD13)
+        target_link_libraries(ds5-bridge
+                hardware_dma
+                hardware_pwm
+        )
+        target_compile_definitions(ds5-bridge PRIVATE
+                DISPLAY_LCD13=1
+        )
+endif ()
 
 pico_add_extra_outputs(ds5-bridge)
 

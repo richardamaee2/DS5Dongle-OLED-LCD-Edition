@@ -35,8 +35,9 @@ Common build flags (set via `-D` on the cmake invocation):
 - `ENABLE_VERBOSE=ON` — chatty BT/HID logging. Default OFF.
 - `ENABLE_BATT_LED=OFF` — disable the low-battery LED blink. Default ON.
 - `PICO_W_BUILD=ON` — build for the original Pico W (drops audio, lower clock). Default targets Pico 2 W.
+- `DISPLAY_LCD13=ON` — target the Waveshare Pico-LCD-1.3 (ST7789VW 240×240 colour) instead of the Pico-OLED-1.3. Produces `ds5-bridge-lcd13.uf2`; the display backend swaps `src/oled.cpp` ↔ `src/lcd.cpp` at compile time (same `oled_init()`/`oled_loop()` API, exactly one is compiled in).
 
-CI runs four build variants in `.github/workflows/build.yml` (standard / debug / no-batt-led / Pico W). When changing build flags or CMake, update the workflow accordingly.
+CI runs five build variants in `.github/workflows/build.yml` (standard OLED / LCD-1.3 colour / debug / no-batt-led / Pico W). When changing build flags or CMake, update the workflow accordingly.
 
 ## Hardware-in-the-loop workflow
 
@@ -139,7 +140,7 @@ Commits in this repo include a `Co-Authored-By: Claude Opus 4.7 (1M context) <no
 When asked to modify behavior, the *first* file to read is usually one of:
 
 - New BT pairing / connection state behavior → `src/bt.cpp` (HCI + L2CAP event handlers).
-- New OLED screen or change to existing one → `src/oled.cpp`.
+- New OLED screen or change to existing one → `src/oled.cpp` — **and mirror it in `src/lcd.cpp`**, the ST7789 colour twin (same screen list, same input semantics; a change of panel must never change behaviour). Latency telemetry shared by both lives in `src/latency.h` + `src/main.cpp`.
 - New diagnostic counter on the OLED Diagnostics screen → bump `kNumDiagRows` in `src/oled.cpp` and add a `case` to `format_diag_row()` (single switch, one row per case). The screen scrolls automatically; no D-pad wiring needed. Counters that need rate-per-second arithmetic should be sampled in `sample_diag_rates()` and read from `g_diag_rates`. Counter globals themselves typically live in `src/main.cpp` next to `g_bt_31_packets` etc. with `extern` declarations near the top of `src/oled.cpp`.
 - Host-side diagnostics → `scripts/mic_diag.sh` (Linux only, reads `/dev/hidraw` directly). Subcommands: `status` / `capture [secs]` / `watch` / `bt-trace`. `bt-trace` reads the firmware's `0xFD` vendor feature report (defined in `src/cmd.cpp`'s `tud_hid_get_report_cb`), which currently exposes BT-input counters + the host-output trigger-flow counters. To add a new counter visible to `bt-trace`: extend the `0xFD` payload in `src/cmd.cpp` (bump `want`, write at the new offset), bump `IOCTL_SIZE` in `bt_trace()` of the script, and add the field to its `decode()` dict. The `0xFD` report ID is not declared in the HID descriptor (Linux hidraw ioctls don't enforce that; WebHID would reject undeclared IDs, which is why config goes through `0xF6`).
 - New persistent config field → `src/config.h` (struct), `src/config.cpp:config_valid()` (defaults + clamping), `src/oled.cpp:format_settings_item()` (UI), `src/oled.cpp:settings_adjust()` (D-pad ▶◀ behavior). Update `CHANGELOG.md`.
