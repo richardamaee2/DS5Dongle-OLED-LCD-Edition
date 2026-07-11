@@ -30,6 +30,7 @@ Quick usage:
   scripts/set_ds5.py --slot 2              # switch active pairing slot
   scripts/set_ds5.py --version             # print firmware version
   scripts/set_ds5.py --rssi                # print live BT RSSI in dBm
+  scripts/set_ds5.py --latency             # print dongle latency telemetry
 
 Credit: protocol + script structure from loteran/DS5Dongle commit 5d6bc2f.
 """
@@ -214,6 +215,50 @@ def get_rssi(device):
     return val - 256 if val >= 128 else val   # int8
 
 
+def get_latency(device):
+    """Read the 0xFD bridge-diagnostics report and decode section 3
+    (latency telemetry, firmware ≥ the LCD/Latency build — bytes 44..75).
+
+    0xFD is intentionally NOT declared in the HID descriptor (declaring
+    vendor IDs is what used to break native game triggers), which Linux
+    hidraw doesn't mind but some Windows HID stacks refuse. On failure the
+    dongle's on-screen Latency page shows the same numbers.
+    """
+    raw = bytes(device.get_feature_report(0xFD, 77))   # id echo + 76 payload
+    data = raw[1:]
+    if len(data) < 76:
+        return None
+    (cfg_mode, act_mode, bt_rate, usb_rate,
+     avg_us, max_us, peak_us, gap_min, gap_max,
+     disp_busy, variant, _rsv) = struct.unpack('<BBHHIIIIIIBB', data[44:76])
+    return {
+        'cfg_mode': cfg_mode, 'act_mode': act_mode,
+        'bt_rate': bt_rate, 'usb_rate': usb_rate,
+        'avg_us': avg_us, 'max_us': max_us, 'peak_us': peak_us,
+        'gap_min_us': gap_min, 'gap_max_us': gap_max,
+        'disp_busy_us': disp_busy, 'variant': variant,
+    }
+
+
+def fmt_latency(t):
+    act = ("(not enumerated yet)" if t['act_mode'] == 0xFF
+           else POLLING_MODES.get(t['act_mode'], '?'))
+    lines = [
+        f"  display variant    {'LCD (ST7789)' if t['variant'] else 'OLED (SH1107)'}",
+        f"  polling configured {POLLING_MODES.get(t['cfg_mode'], '?')}",
+        f"  polling enumerated {act}",
+        f"  BT in rate         {t['bt_rate']} reports/s",
+        f"  USB out rate       {t['usb_rate']} reports/s",
+        f"  transit avg/max    {t['avg_us']} / {t['max_us']} µs  (last 1 s window)",
+        f"  transit peak       {t['peak_us']} µs  (since boot)",
+        f"  BT gap min-max     {t['gap_min_us']}-{t['gap_max_us']} µs",
+        f"  display busy max   {t['disp_busy_us']} µs  (worst render+flush block)",
+    ]
+    if t['act_mode'] != 0xFF and t['act_mode'] != t['cfg_mode']:
+        lines.append("  [!] polling mode changed since enumeration — replug USB to apply")
+    return "\n".join(lines)
+
+
 def fmt_cfg(c):
     lines = [
         f"  config_version     {c['config_version']}",
@@ -259,6 +304,8 @@ def build_parser():
     p = argparse.ArgumentParser(description="DS5Dongle (OLED / 4-Player Edition) config tool.")
     p.add_argument('--version', action='store_true', help="print firmware version and exit")
     p.add_argument('--rssi', action='store_true', help="print live BT RSSI (dBm) and exit")
+    p.add_argument('--latency', action='store_true',
+                   help="print dongle latency telemetry (transit µs, rates, jitter) and exit")
     p.add_argument('--haptics-gain', type=float, help="float [1.0, 2.0]")
     p.add_argument('--speaker-volume', type=float, help="dB [-100, 0]")
     p.add_argument('--inactive-time', type=int, help="minutes [10, 60]")
@@ -288,6 +335,21 @@ def main():
     if args.rssi:
         rssi = get_rssi(device)
         print(f"BT RSSI: {rssi} dBm" if rssi is not None else "RSSI unavailable")
+        return
+    if args.latency:
+        try:
+            t = get_latency(device)
+        except Exception as e:
+            print(f"[ERROR] 0xFD read failed ({type(e).__name__}: {e}).", file=sys.stderr)
+            print("        Windows refuses undeclared feature-report IDs; use the", file=sys.stderr)
+            print("        dongle's on-screen Latency page (same numbers) or Linux hidraw.", file=sys.stderr)
+            sys.exit(1)
+        if t is None:
+            print("[ERROR] Firmware too old — no latency section in 0xFD. Flash the "
+                  "Latency/LCD build first.", file=sys.stderr)
+            sys.exit(1)
+        print("Latency telemetry:")
+        print(fmt_latency(t))
         return
 
     cfg = get_config(device)
