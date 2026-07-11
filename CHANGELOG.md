@@ -6,6 +6,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version
 
 ---
 
+## [Unreleased]
+
+Headline: **the dongle goes colour — optional Waveshare Pico-LCD-1.3 (ST7789VW, 240×240 IPS) support as a second, CI-built firmware variant**, plus a **Latency screen** on both displays and a **1 kHz polling default**. The OLED build is behaviourally unchanged apart from those last two.
+
+### Added
+
+- **Pico-LCD-1.3 colour display backend (`src/lcd.cpp`), selected at compile time** with `-DDISPLAY_LCD13=ON` → `ds5-bridge-lcd13.uf2` (CI now builds it alongside the OLED variant; five variants total). Same plug-on footprint and SPI pins as the OLED; backlight on GP13. All 12 screens ported to 240×240 colour with identical A/B (KEY0/KEY1) navigation, identical controller-button semantics, and the same headless no-op guarantee — no display attached, nothing changes.
+  - **Latency-neutral by construction:** the ~115 KB frame is streamed to the panel by background DMA (DREQ-paced into SPI1), never CPU-blocking; the render pass into RAM is budgeted against the OLED's blocking flush, and **both builds self-measure their worst display-path block** (Latency screen "Disp" row / `0xFD` bytes [70..73]) so the "LCD must not cost a microsecond" requirement is verifiable on hardware.
+  - **Per-player colour theming:** UI accent follows `player_id` — P1 blue / P2 red / P3 green / P4 pink, the exact PS5 colours the 4-Player Edition stamps on the lightbar. `player_id` off → neutral white chrome. The Lightbar screen gains a true-colour live swatch + favourite swatches; battery/RSSI/temperature colour-code by state.
+  - **Backlight in the idle power ladder:** Active → user brightness (B long-press cycles 100/55/28/10 %, persisted in the same `screen_brightness` field), Dim → 4 % glow + the walking dot, Off → backlight fully off + panel DISPOFF. Same `screen_dim_timeout` / `screen_off_timeout` fields and wake triggers as the OLED ladder; built for dark rooms where an IPS backlight glows even on black.
+  - **5-way joystick support (optional extra):** stick = D-pad-equivalent navigation on Settings / Slots / Diagnostics, CTRL press = Triangle-equivalent (save/switch) — the panel is fully navigable with no controller connected. Controller input always wins; X/Y buttons reserved.
+- **New "Latency" screen on BOTH display variants** (between Diagnostics and CPU): configured vs actually-enumerated USB polling mode (flags "replug USB" when they differ), measured BT input-report rate and USB report-out rate, **dongle transit latency** (BT arrival in `on_bt_data()` → `tud_hid_report()` accepted) as rolling 1 s avg/max plus boot peak, BT inter-packet gap min/max, and the display-path budget readout. Measurement overhead on the hot path is two timestamps and a handful of integer ops; all averaging happens at display rate (`src/latency.h`, accumulators in `src/main.cpp`).
+- **`0xFD` vendor feature report grows a latency section** (bytes 44–75: poll modes, rates, transit avg/max/peak, BT gap, display-busy, display variant). Old 44-byte readers (`mic_diag.sh bt-trace`) keep working — the payload is reqlen-guarded. `scripts/set_ds5.py --latency` pretty-prints it host-side.
+
+### Changed
+
+- **Default `polling_rate_mode` is now 2 (real-time / 1 kHz)** on fresh flash or factory reset (`config_valid()`); an explicitly saved 250/500 Hz choice still sticks. The endpoint `bInterval` is patched at enumeration, so polling changes take effect on the next USB replug — the Latency screen and `--latency` both call this out when config and enumeration disagree.
+- `tud_descriptor_configuration_cb` records which poll mode it last patched into the endpoint descriptors (`g_usb_active_poll_mode`) — bookkeeping only, **no descriptor byte changes**; the HID report descriptor remains byte-identical to a real DS5 (289 bytes).
+
+---
+
+## [0.7.0-4player] — 2026-07-07
+
+Multi-dongle "4-Player Edition": run four dongles side by side — one per DualSense — with per-dongle player identity and a pairing lock so dongles can never steal each other's controllers. One controller per Pico 2 W is a hard physical constraint (single full-speed USB device + one BR/EDR radio + core 1 fully owned by one Opus encoder), so 4-player = 4 dongles; these changes make that arrangement first-class. Defaults change nothing for single-dongle users; audio/trigger/mic/descriptor paths untouched.
+
+### Added
+
+- **Per-dongle player identity** — new persisted config field `player_id` (0 = off, default; 1–4). On connect the dongle stamps PS5-style defaults into `state[]`: player-indicator LED bitmask (0x04/0x0A/0x15/0x1B, per hid-playstation/SDL) and — only while `lightbar_mode` is HOST — the PS5 player colour (P1 blue / P2 red / P3 green / P4 pink). Host output reports override both the moment they arrive (`AllowLedColor` / `AllowPlayerIndicators` are tracked as host claims and the stamps yield until next connect — console semantics). Because the DS5 ignores LED writes during its pair animation, `player_tick()` (main loop) re-stamps and pushes a `0x31` every 500 ms from 0.5–4.5 s after connect, skipped while the speaker stream is active (state already rides the 0x36 audio frames; the load-bearing audio path is not intruded on). OLED: `Player` row in Settings, `P#` badge on the Status header. CLI: `set_ds5.py --player {off,1..4}`.
+- **Pairing lock** — new persisted config field `pair_lock` (0 = open, default; 1 = locked). While locked: the dongle is never BT-discoverable (even with empty slots), inquiry results can't auto-assign an unknown controller into an empty slot, and unknown incoming connection requests are rejected (`hci_reject_connection_request`, reason 0x0F). Bonded controllers reconnect exactly as before. New `bt_pairing_posture_refresh()` applies a changed lock immediately when saved from the OLED Settings screen or written via the `0xF6` config report. OLED: `PairLock` row in Settings. CLI: `set_ds5.py --pair-lock {on,off}`.
+- **CLI** — `scripts/set_ds5.py` updated to the full 39-byte `Config_body`, auto-detects the connected firmware's body length via the `'RM'` remap-block marker in the `0xF7` response (stays compatible with older firmware; refuses to set fields the firmware doesn't have).
+
+### Changed
+
+- `Config_body` grows 37 → 39 bytes (`player_id`, `pair_lock` appended). Upgrade-safe: erased-flash/older-config bytes read 0xFF and clamp to the off/open defaults in `config_valid()`. Settings screen grows to 19 items (Reset/Wipe indices shift to 17/18).
+
+### Notes for multi-dongle setups
+
+- Pair one dongle at a time on first setup (two *empty, unlocked* dongles can race for a controller in pairing mode), then set `pair_lock on` on all four.
+- Four dongles exceed an unpowered hub's budget (each is descriptor-rated 500 mA) — use a powered USB 2.0 hub; avoid USB 3.x ports (2.4 GHz RFI, see v0.6.8 notes, now ×4).
+
+---
+
 ## [0.6.12-oled-edition] — 2026-06-07
 
 > **Supersedes the withdrawn v0.6.11.** v0.6.11 bundled the two OLED quality-of-life features below with two regressions (constant haptics, issue #11; an audio retiming change, issue #12) and is not recommended. v0.6.12 is built on the verified-working native-trigger firmware and folds in **only** the two separable good features — `CtrlWake` and brightness persistence — leaving the trigger and audio code paths byte-identical to the tested build. The v0.6.11 regression changes (the `state_mgr.cpp` trigger-FFB allow-bit mirror and the `audio.cpp` resampler retiming) are intentionally **not** carried over.
