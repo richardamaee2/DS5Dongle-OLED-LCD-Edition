@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **Pico2W DualSense 5 Bridge — OLED Edition** are documented here. This fork tracks [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) (upstream) and adds an optional OLED status display plus a security/correctness audit pass on the core bridge.
+All notable changes to **Pico2W DualSense 5 Bridge — OLED & LCD Edition** are documented here. This fork tracks [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) (upstream) and adds an optional status display — OLED (128×64, B&W) or LCD (240×240, colour) — plus 4-player multi-dongle support and a security/correctness audit pass on the core bridge.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning approximates [SemVer](https://semver.org/) with the upstream version stream — the fork shares a major.minor with whatever upstream tag it is rebased on.
 

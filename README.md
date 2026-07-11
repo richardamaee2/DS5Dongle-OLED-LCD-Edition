@@ -1,10 +1,23 @@
-# Pico2W DualSense 5 Bridge — OLED Edition
+# Pico2W DualSense 5 Bridge — OLED & LCD Edition
 
 [中文](./README.CN.md)
 
-> Turn a Raspberry Pi Pico2W into a wireless adapter for the DualSense (DS5) controller — with an optional on-board status display.
+> Turn a Raspberry Pi Pico2W into a wireless adapter for the DualSense (DS5) controller — with an optional on-board status display: **OLED (black & white)** or **LCD (colour)**.
 
-> **OLED Edition** is a fork of **[awalol/DS5Dongle](https://github.com/awalol/DS5Dongle)** (upstream) that adds an optional Pico-OLED-1.3 128×64 display add-on with 11 screens (status, 4-slot multi-controller pairing, lightbar color picker with favorites and effect presets, trigger test, gyro tilt, touchpad, diagnostics, CPU/clock, BT signal strength, audio VU meters, and a persistent settings menu), plus a DS5 button-combo soft-reboot. Upstream is the authoritative source for the core bridge firmware; this fork tracks it and layers add-on features on top.
+> **OLED & LCD Edition** is a fork of **[awalol/DS5Dongle](https://github.com/awalol/DS5Dongle)** (upstream) that adds an optional plug-on status display — **Waveshare Pico-OLED-1.3 (128×64, black & white)** or **Waveshare Pico-LCD-1.3 (240×240, 65K-colour IPS)** — with 12 screens (status, 4-slot multi-controller pairing, lightbar color picker with favorites and effect presets, trigger test, gyro tilt, touchpad, diagnostics, latency telemetry, CPU/clock, BT signal strength, audio VU meters, and a persistent settings menu), plus 4-player multi-dongle support (per-dongle player identity + pairing lock) and a DS5 button-combo soft-reboot. Upstream is the authoritative source for the core bridge firmware; this fork tracks it and layers add-on features on top.
+
+## Display variants — OLED (B&W) vs LCD (colour)
+
+One codebase, two firmwares. Every CI build produces **both** UF2s — flash the one matching the panel on your Pico:
+
+| | **OLED (B&W)** | **LCD (colour)** |
+|---|---|---|
+| Panel | Waveshare Pico-OLED-1.3 (SH1107, 128×64 mono) | Waveshare Pico-LCD-1.3 (ST7789VW, 240×240 65K-colour IPS) |
+| Firmware | `ds5-bridge-oled.uf2` | `ds5-bridge-lcd13.uf2` |
+| CMake | (default) | `-DDISPLAY_LCD13=ON` |
+| Extras | — | per-player colour theming (P1 blue / P2 red / P3 green / P4 pink), PWM backlight power ladder, 5-way joystick navigation |
+
+Same 12 screens, same A/B (KEY0/KEY1) navigation, same controller shortcuts on both. The headless rule is unchanged: with **no display attached, either firmware boots and runs identically**. LCD bring-up checklist: [`docs/LCD13-TEST-PLAN.md`](./docs/LCD13-TEST-PLAN.md).
 
 ---
 
@@ -254,7 +267,7 @@ To build the project from source:
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH="$PICO_SDK_PATH"
    cmake --build build --target ds5-bridge
    ```
-4. The UF2 lands at `build/ds5-bridge-oled.uf2`. Flash with BOOTSEL as usual.
+4. The UF2 lands at `build/ds5-bridge-oled.uf2` — or `build/ds5-bridge-lcd13.uf2` when configured with `-DDISPLAY_LCD13=ON` (colour LCD build). Flash with BOOTSEL as usual.
 
 Build flags worth knowing:
 
@@ -293,6 +306,8 @@ Originally written to triage the parked DS5 BT-microphone investigation (see [BL
 ## OLED Display Add-on (optional)
 
 If you plug a [Waveshare Pico-OLED-1.3](#hardware) onto the Pico2W's headers, the firmware drives it automatically as a live status display. No configuration needed — the firmware no-ops gracefully when no OLED is present.
+
+> **LCD too:** everything in this section applies equally to the colour build (`ds5-bridge-lcd13.uf2` + Pico-LCD-1.3) — same screens, same buttons (A = KEY0, B = KEY1), rendered at 240×240 in colour with per-player accent theming. LCD-only extras: B-long-press cycles backlight brightness, the idle power ladder dims and then fully cuts the backlight (dark-room friendly), and the 5-way joystick navigates Settings/Slots/Diagnostics with no controller connected.
 
 ### Boot splash (1.5 s on power-on)
 

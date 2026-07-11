@@ -1,6 +1,8 @@
-# Pico2W DualSense 5 Bridge — OLED Edition
+# Pico2W DualSense 5 Bridge — OLED & LCD Edition
 
 [English](./README.md)
+
+> **本分支现已同时支持两种显示屏**：OLED（黑白，Pico-OLED-1.3）与 LCD（彩色，Pico-LCD-1.3，240×240 IPS）。每次构建产出两个固件：`ds5-bridge-oled.uf2` 与 `ds5-bridge-lcd13.uf2`，屏幕内容与按键操作完全一致。详见英文 README 的 “Display variants” 一节；本中文文档其余部分以 OLED 版为例。
 
 > 将 Raspberry Pi Pico2W 变成 DualSense (DS5) 手柄的无线适配器 —— 并可选配板载状态显示屏。
 

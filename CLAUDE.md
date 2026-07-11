@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Raspberry Pi Pico 2 W (RP2350) firmware that bridges a Sony DualSense (DS5) controller over Bluetooth Classic to a USB host. Presents itself to the host as a USB HID + UAC1 audio composite device. This repo is `MarcelineVPQ/DS5Dongle-OLED-Edition`, a personal fork of upstream `awalol/DS5Dongle` that adds an optional Waveshare Pico-OLED-1.3 status display (10 screens) and a 4-slot persistent multi-controller pairing layer.
+A Raspberry Pi Pico 2 W (RP2350) firmware that bridges a Sony DualSense (DS5) controller over Bluetooth Classic to a USB host. Presents itself to the host as a USB HID + UAC1 audio composite device. This repo is `richardamaee2/DS5Dongle-OLED-LCD-Edition` (formerly `-OLED-Edition`), a fork of `MarcelineVPQ/DS5Dongle-OLED-Edition` / upstream `awalol/DS5Dongle` that adds an optional status display — Waveshare Pico-OLED-1.3 (128×64 B&W, `src/oled.cpp`) or Pico-LCD-1.3 (240×240 colour, `src/lcd.cpp`, `-DDISPLAY_LCD13=ON`), 12 screens each — a 4-slot persistent multi-controller pairing layer, and the 4-Player multi-dongle additions (player_id, pair_lock).
 
 `README.md` is authoritative for user-facing capability; `CHANGELOG.md` tracks what shipped per release. Read both before proposing changes — much of the design is non-obvious from the code alone (audit history, BT pairing-posture rationale, overclock requirement).
 
