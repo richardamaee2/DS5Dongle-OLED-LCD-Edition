@@ -799,8 +799,10 @@ __attribute__((noinline)) void render_screen() {
     } else {
         draw_text(kContentX, 14, "Pair your DualSense:");
         draw_text(kContentX, 26, "1. Hold Create + PS");
-        draw_text(kContentX, 36, "2. Wait for light bar");
-        draw_text(kContentX, 46, "   to flash blue");
+        // 128 px wide, content at x=6, 6 px per glyph: 20 chars max per line.
+        draw_text(kContentX, 36, "2. Wait for the");
+        draw_text(kContentX, 46, "   light bar to");
+        draw_text(kContentX, 56, "   flash blue");
     }
 
     flush_fb();
@@ -980,6 +982,14 @@ __attribute__((noinline)) void render_screen_diag() {
 // jitter, and the display path's own worst blocking time. All numbers come
 // from main.cpp's 1 s accumulation windows â latency_get() is the only call
 // this screen makes, so rendering it adds nothing to the input path.
+// µs → "x.xx" ms string (2 dp). Clamps at "99.9+" so worst-case row widths
+// stay inside the panel budget (20 chars at scale 1 / 18 at LCD scale 2).
+static void fmt_ms(char *dst, size_t n, uint32_t us) {
+    if (us >= 99990) { snprintf(dst, n, "99.9+"); return; }
+    snprintf(dst, n, "%lu.%02lu", (unsigned long)(us / 1000),
+             (unsigned long)((us % 1000) / 10));
+}
+
 __attribute__((noinline)) void render_screen_latency() {
     fb_clear();
     draw_text(kContentX, 0, "Latency");
@@ -997,15 +1007,19 @@ __attribute__((noinline)) void render_screen_latency() {
     draw_text(kContentX, 9, buf);
     snprintf(buf, sizeof(buf), "USBout: %lu/s", (unsigned long)ls.usb_rate);
     draw_text(kContentX, 18, buf);
-    // Dongle transit: BT arrival -> accepted by the USB endpoint. avg/max of
-    // the last 1 s window; Peak holds the worst case since boot.
-    snprintf(buf, sizeof(buf), "Trans %lu/%luus",
-             (unsigned long)ls.transit_avg_us, (unsigned long)ls.transit_max_us);
+    // Dongle transit in ms: BT arrival -> accepted by the USB endpoint.
+    // avg/max over the last 1 s window; pk holds the worst case since boot.
+    char a[8], m[8], p[8];
+    fmt_ms(a, sizeof(a), ls.transit_avg_us);
+    fmt_ms(m, sizeof(m), ls.transit_max_us);
+    fmt_ms(p, sizeof(p), ls.transit_peak_us);
+    snprintf(buf, sizeof(buf), "Lat avg %sms", a);
     draw_text(kContentX, 27, buf);
-    snprintf(buf, sizeof(buf), "Peak  : %luus", (unsigned long)ls.transit_peak_us);
+    snprintf(buf, sizeof(buf), "max %s pk %sms", m, p);
     draw_text(kContentX, 36, buf);
-    snprintf(buf, sizeof(buf), "BT gap: %lu-%luus",
-             (unsigned long)ls.bt_gap_min_us, (unsigned long)ls.bt_gap_max_us);
+    fmt_ms(a, sizeof(a), ls.bt_gap_min_us);
+    fmt_ms(m, sizeof(m), ls.bt_gap_max_us);
+    snprintf(buf, sizeof(buf), "gap %s-%sms", a, m);
     draw_text(kContentX, 45, buf);
 
     // Footer: the replug warning wins over the display-budget readout â a
@@ -1013,8 +1027,8 @@ __attribute__((noinline)) void render_screen_latency() {
     if (g_usb_active_poll_mode != 0xFF && g_usb_active_poll_mode != cfg_mode) {
         draw_text(kContentX, 56, "Poll chg: replug USB");
     } else {
-        snprintf(buf, sizeof(buf), "Disp busy max %luus",
-                 (unsigned long)latency_display_busy_max_us());
+        fmt_ms(a, sizeof(a), latency_display_busy_max_us());
+        snprintf(buf, sizeof(buf), "Disp busy max %sms", a);
         draw_text(kContentX, 56, buf);
     }
     flush_fb();
@@ -1860,7 +1874,7 @@ __attribute__((noinline)) void render_screen_slots() {
         draw_text(kContentX, 9 + i * 9, line);
     }
 
-    draw_text(kContentX, 56, "Tri=switch Sq hold=wipe");
+    draw_text(kContentX, 56, "Tri=swap SqHold=wipe");
     flush_fb();
 }
 

@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "utils.h"
+#include "bt.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/cyw43_arch.h"
@@ -180,18 +181,20 @@ const Config_body& get_config() {
     return config.body;
 }
 
+void pico_led_apply() {
+    const bool on = !config.body.disable_pico_led && bt_is_connected();
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
+}
+
 void set_config(const uint8_t *new_config, const uint16_t len) {
     const auto copy_len = len < sizeof(Config_body) ? len : sizeof(Config_body);
     memcpy(&config.body, new_config, copy_len);
     config_valid();
-    if (config.body.disable_pico_led) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
-    }else {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
-    }
+    pico_led_apply();
 }
 
 void set_config(const Config_body &new_config) {
     config.body = new_config;
     config_valid();
+    pico_led_apply();
 }

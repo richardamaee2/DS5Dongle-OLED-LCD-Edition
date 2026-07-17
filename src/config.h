@@ -84,6 +84,14 @@ const Config_body& get_config();
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();
 void set_config(const Config_body &new_config);
+
+// Re-assert the Pico onboard LED from current policy: on only while a
+// controller is connected AND disable_pico_led is clear. Called by both
+// set_config overloads so a Settings-screen save or 0xF6 web-config write
+// takes effect immediately (previously only applied on the next
+// connect/disconnect edge). battery_led.cpp's critical-battery blink
+// deliberately overrides this while active.
+void pico_led_apply();
 extern bool is_dse;
 
 #endif //DS5_BRIDGE_CONFIG_H

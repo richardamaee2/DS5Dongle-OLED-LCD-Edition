@@ -1306,10 +1306,13 @@ __attribute__((noinline)) void render_screen() {
         sq(0,  13, b7 & 0x20); // Cross
         sq(-13, 0, b7 & 0x10); // Square
     } else {
-        draw_text(kContentX, row_y(2),     "Pair your DualSense:", kWhite, 2);
-        draw_text(kContentX, row_y(3),     "1. Hold Create + PS", kGrey, 2);
-        draw_text(kContentX, row_y(4),     "2. Wait for light bar", kGrey, 2);
-        draw_text(kContentX, row_y(5),     "   to flash blue", kGrey, 2);
+        // Max 18 chars per line at scale 2: content starts at x=8, one glyph
+        // cell is 12 px, and [228..240) is reserved for the A/B chrome.
+        draw_text(kContentX, row_y(2),     "Pair DualSense:", kWhite, 2);
+        draw_text(kContentX, row_y(3),     "1. Hold Create+PS", kGrey, 2);
+        draw_text(kContentX, row_y(4),     "2. Wait for the", kGrey, 2);
+        draw_text(kContentX, row_y(5),     "   light bar to", kGrey, 2);
+        draw_text(kContentX, row_y(6),     "   flash blue", kGrey, 2);
     }
 
     flush_fb();
@@ -1373,6 +1376,13 @@ __attribute__((noinline)) void render_screen_diag() {
 
 // Latency telemetry (src/latency.h) — same numbers as the OLED variant and
 // the 0xFD report; see render_screen_latency in oled.cpp for field notes.
+// µs → "x.xx" ms string (2 dp), clamped at "99.9+" — see oled.cpp twin.
+static void fmt_ms(char *dst, size_t n, uint32_t us) {
+    if (us >= 99990) { snprintf(dst, n, "99.9+"); return; }
+    snprintf(dst, n, "%lu.%02lu", (unsigned long)(us / 1000),
+             (unsigned long)((us % 1000) / 10));
+}
+
 __attribute__((noinline)) void render_screen_latency() {
     fb_clear();
 
@@ -1390,21 +1400,26 @@ __attribute__((noinline)) void render_screen_latency() {
     draw_text(kContentX, row_y(0), buf, kWhite, 2);
     snprintf(buf, sizeof(buf), "USBout: %lu/s", (unsigned long)ls.usb_rate);
     draw_text(kContentX, row_y(1), buf, kWhite, 2);
-    snprintf(buf, sizeof(buf), "Trans : %lu/%luus",
-             (unsigned long)ls.transit_avg_us, (unsigned long)ls.transit_max_us);
+    // Dongle transit in ms (BT arrival -> USB accept); 18-char scale-2 budget.
+    char a[8], m[8], p[8];
+    fmt_ms(a, sizeof(a), ls.transit_avg_us);
+    fmt_ms(m, sizeof(m), ls.transit_max_us);
+    fmt_ms(p, sizeof(p), ls.transit_peak_us);
+    snprintf(buf, sizeof(buf), "Lat avg %sms", a);
     draw_text(kContentX, row_y(2), buf, theme_accent(), 2);
-    snprintf(buf, sizeof(buf), "Peak  : %luus", (unsigned long)ls.transit_peak_us);
+    snprintf(buf, sizeof(buf), "max %s pk %s", m, p);
     draw_text(kContentX, row_y(3), buf, kWhite, 2);
-    snprintf(buf, sizeof(buf), "BT gap: %lu-%luus",
-             (unsigned long)ls.bt_gap_min_us, (unsigned long)ls.bt_gap_max_us);
+    fmt_ms(a, sizeof(a), ls.bt_gap_min_us);
+    fmt_ms(m, sizeof(m), ls.bt_gap_max_us);
+    snprintf(buf, sizeof(buf), "gap %s-%sms", a, m);
     draw_text(kContentX, row_y(4), buf, kWhite, 2);
-    snprintf(buf, sizeof(buf), "Disp  : %luus max",
-             (unsigned long)latency_display_busy_max_us());
+    fmt_ms(a, sizeof(a), latency_display_busy_max_us());
+    snprintf(buf, sizeof(buf), "Disp max %sms", a);
     draw_text(kContentX, row_y(5), buf, kWhite, 2);
 
     if (g_usb_active_poll_mode != 0xFF && g_usb_active_poll_mode != cfg_mode) {
         // A stale bInterval invalidates every number a latency hunt cares about.
-        draw_text(kContentX, kFooterY, "Poll chg: replug USB", kRed, 2);
+        draw_text(kContentX, kFooterY, "Poll chg = replug", kRed, 2);
     } else {
         draw_footer("avg/max = last 1s");
     }
@@ -1624,7 +1639,7 @@ __attribute__((noinline)) void render_screen_lightbar() {
             rect_outline(fx, 166, 34, 18, kGrey);
             rect_filled(fx + 2, 168, 30, 14, rgb565(lb_fav_r[i], lb_fav_g[i], lb_fav_b[i]));
         }
-        draw_text(kContentX, 192, "Sv:T=0 C=1 X=2 S=3", kGrey, 2);
+        draw_text(kContentX, 192, "Sv:T0 C1 X2 S3", kGrey, 2);
 
         const char* hint =
             (lb_mode == 0)           ? "Tilt = R/G/B"   :
@@ -1663,7 +1678,7 @@ __attribute__((noinline)) void render_screen_vu() {
         const int hfill = (hap * 212) / 255;
         if (hfill > 0) rect_filled(kContentX + 2, row_y(3) + 8, hfill, 14, accent);
 
-        draw_text(kContentX, row_y(5), "Live USB audio peaks", kGrey, 2);
+        draw_text(kContentX, row_y(5), "USB audio peaks", kGrey, 2);
     } else {
         draw_text(kContentX, row_y(3), "(no controller)", kGrey, 2);
     }
