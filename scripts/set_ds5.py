@@ -8,8 +8,10 @@ loteran/DS5Dongle's scripts/set_ds5.py and extended for this fork's
 Config_body layout.
 
 4-Player Edition additions:
-  --player {off,1,2,3,4}   per-dongle player identity (PS5-style player LEDs
-                           + player lightbar colour until the game overrides)
+  --player {off,1..8}      per-dongle player identity (PS5-style player LEDs
+                           + player lightbar colour until the game overrides;
+                           P5-P8 are fork colours and default the BT mic off)
+  --bt-mic {on,off}        DualSense mic over Bluetooth
   --pair-lock {on,off}     freeze the bonded-controller set (a locked dongle
                            never pairs new controllers — multi-dongle etiquette)
 
@@ -126,7 +128,8 @@ AUTO_HAP_MODES   = {
 LOWPASS_MODES = {0: "80 Hz", 1: "160 Hz", 2: "250 Hz", 3: "400 Hz"}
 LIGHTBAR_MODES = {0: "LIVE", 1: "FAV0", 2: "FAV1", 3: "FAV2", 4: "FAV3",
                   5: "Breathing", 6: "Rainbow", 7: "Fade", 8: "HOST (passthrough)"}
-PLAYER_MODES = {0: "off", 1: "P1 (blue)", 2: "P2 (red)", 3: "P3 (green)", 4: "P4 (pink)"}
+PLAYER_MODES = {0: "off", 1: "P1 (blue)", 2: "P2 (red)", 3: "P3 (green)", 4: "P4 (pink)",
+                5: "P5 (orange)", 6: "P6 (cyan)", 7: "P7 (purple)", 8: "P8 (yellow)"}
 
 
 def open_device():
@@ -297,7 +300,8 @@ AUTO_HAP_ARG = {'off': 0, 'fallback': 1, 'mix': 2, 'replace': 3}
 LOWPASS_ARG  = {'80': 0, '160': 1, '250': 2, '400': 3}
 CTRL_MODE_ARG = {'ds5': 0, 'dse': 1, 'auto': 2}
 POLL_ARG     = {'250': 0, '500': 1, 'realtime': 2, 'rt': 2}
-PLAYER_ARG   = {'off': 0, '1': 1, '2': 2, '3': 3, '4': 4}
+PLAYER_ARG   = {'off': 0, '1': 1, '2': 2, '3': 3, '4': 4,
+                '5': 5, '6': 6, '7': 7, '8': 8}
 
 
 def build_parser():
@@ -319,7 +323,9 @@ def build_parser():
     p.add_argument('--auto-haptics-gain', type=int, help="percent [0, 200]")
     p.add_argument('--auto-haptics-lp', choices=LOWPASS_ARG.keys(), help="LP cutoff Hz")
     p.add_argument('--player', choices=PLAYER_ARG.keys(),
-                   help="4-Player Edition: player identity for THIS dongle (off, 1-4)")
+                   help="player identity for THIS dongle (off, 1-8; 5+ defaults BT mic off)")
+    p.add_argument('--bt-mic', choices=['on', 'off'],
+                   help="DualSense mic over BT (costs controller battery + 2.4 GHz airtime)")
     p.add_argument('--pair-lock', choices=['on', 'off'],
                    help="4-Player Edition: lock pairing to the already-bonded controllers")
     return p
@@ -379,7 +385,14 @@ def main():
     if args.auto_haptics is not None:    set_kv('auto_haptics_enable', AUTO_HAP_ARG[args.auto_haptics])
     if args.auto_haptics_gain is not None: set_kv('auto_haptics_gain', args.auto_haptics_gain)
     if args.auto_haptics_lp is not None: set_kv('auto_haptics_lowpass', LOWPASS_ARG[args.auto_haptics_lp])
-    if args.player is not None:          set_kv('player_id', PLAYER_ARG[args.player])
+    if args.player is not None:
+        set_kv('player_id', PLAYER_ARG[args.player])
+        # 8-Player extension: picking P5..P8 defaults the BT mic off (airtime),
+        # unless --bt-mic was given explicitly in the same invocation.
+        if PLAYER_ARG[args.player] >= 5 and args.bt_mic is None:
+            set_kv('bt_mic_enable', 0, label='bt_mic (auto-off for P5-P8)')
+    if args.bt_mic is not None:
+        set_kv('bt_mic_enable', 1 if args.bt_mic == 'on' else 0, label='bt_mic')
     if args.pair_lock is not None:
         set_kv('pair_lock', 1 if args.pair_lock == 'on' else 0)
 
