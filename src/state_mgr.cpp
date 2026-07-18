@@ -63,7 +63,7 @@ void state_get_led(uint8_t *r, uint8_t *g, uint8_t *b) {
 }
 
 // ---- 4-Player Edition: per-dongle player identity --------------------------
-// When config.player_id is 1..4 the dongle applies PS5-style defaults at
+// When config.player_id is 1..8 the dongle applies PS5-style defaults at
 // connect time: the white player-indicator LEDs show the player number, and —
 // while lightbar_mode is HOST/passthrough — the lightbar shows the PS5 player
 // colour (P1 blue / P2 red / P3 green / P4 pink). Exactly like a console: the
@@ -85,21 +85,29 @@ static absolute_time_t g_player_connect_time = 0;
 static absolute_time_t g_player_last_push = 0;
 static bool g_player_assert_pending = false;
 
-// Player-indicator bitmasks per Linux hid-playstation / SDL (P1..P4).
-static constexpr uint8_t kPlayerLedMask[4] = {0x04, 0x0A, 0x15, 0x1B};
-// PS5 player colours: P1 blue, P2 red, P3 green, P4 pink.
-static constexpr uint8_t kPlayerColor[4][3] = {
+// Player-indicator bitmasks per Linux hid-playstation / SDL (P1..P4). The PS5
+// only defines four; P5..P8 patterns are this fork's own, chosen to be
+// mutually distinct on the 5-LED bar (8-Player extension).
+static constexpr uint8_t kPlayerLedMask[8] = {0x04, 0x0A, 0x15, 0x1B,
+                                              0x1F, 0x11, 0x0E, 0x17};
+// Player colours: P1..P4 are the PS5 set (blue/red/green/pink); P5..P8 are
+// fork-invented (orange/cyan/purple/yellow), matched by the LCD accent table.
+static constexpr uint8_t kPlayerColor[8][3] = {
     {0, 0, 255},
     {255, 0, 0},
     {0, 255, 0},
     {255, 0, 128},
+    {255, 120, 0},
+    {0, 200, 220},
+    {150, 60, 255},
+    {255, 200, 0},
 };
 // Keep in sync with kLbModeHost in src/oled.cpp (documented in config.h).
 constexpr uint8_t kLightbarModeHost = 8;
 
 static void player_stamp() {
     const uint8_t pid = get_config().player_id;
-    if (pid < 1 || pid > 4) return;
+    if (pid < 1 || pid > 8) return;
     if (!g_host_player_claimed) {
         // PlayerLightFade (bit 5) left 0 = LEDs fade in, like a console slot assign.
         state[kPlayerIndicatorsOffset] = kPlayerLedMask[pid - 1];
@@ -116,7 +124,7 @@ void player_on_connect() {
     g_player_connect_time = get_absolute_time();
     g_player_last_push = 0;
     const uint8_t pid = get_config().player_id;
-    g_player_assert_pending = (pid >= 1 && pid <= 4);
+    g_player_assert_pending = (pid >= 1 && pid <= 8);
     if (g_player_assert_pending) player_stamp();
 }
 

@@ -126,7 +126,7 @@ void config_valid() {
         body->controller_wakes_display = 1;
         printf("[Config] controller_wakes_display invalid, defaulting to 1 (on)\n");
     }
-    if (body->player_id > 4) {                // 0xFF erased / upgrade → default off
+    if (body->player_id > 8) {                // 0xFF erased / upgrade → default off
         body->player_id = 0;
         printf("[Config] player_id invalid, defaulting to 0 (off)\n");
     }

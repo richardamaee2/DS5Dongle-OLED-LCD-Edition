@@ -19,7 +19,7 @@ void state_set_led(uint8_t r, uint8_t g, uint8_t b);
 void state_get_led(uint8_t *r, uint8_t *g, uint8_t *b);
 
 // ---- 4-Player Edition: per-dongle player identity --------------------------
-// PS5-style connect defaults driven by config.player_id (0=off, 1..4): the
+// PS5-style connect defaults driven by config.player_id (0=off, 1..8): the
 // white player-indicator LEDs and, while lightbar_mode is HOST (passthrough),
 // the PS5 player colour. The host keeps full ownership — its own AllowLedColor
 // / AllowPlayerIndicators output reports override these defaults the moment

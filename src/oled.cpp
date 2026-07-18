@@ -694,8 +694,8 @@ __attribute__((noinline)) void render_screen() {
     draw_text(kContentX, 0, "DS5 Bridge " FIRMWARE_VERSION);
     draw_icon(120, 0, connected ? kIconLinkOn : kIconLinkOff, 8, 8);
 
-    // 4-Player Edition: per-dongle player badge (config.player_id 1..4).
-    if (get_config().player_id >= 1 && get_config().player_id <= 4) {
+    // Per-dongle player badge (config.player_id 1..8, 8-Player extension).
+    if (get_config().player_id >= 1 && get_config().player_id <= 8) {
         char pbadge[4];
         snprintf(pbadge, sizeof(pbadge), "P%u", get_config().player_id);
         draw_text(110, 9, pbadge);
@@ -1626,9 +1626,11 @@ void settings_adjust(int delta) {
         }
         case 13: c.bt_mic_enable ^= 1; break; // BT mic on/off
         case 14: c.controller_wakes_display ^= 1; break; // controller activity wakes OLED on/off
-        case 15: { // player_id 0 (off) .. 4, wraps (4-Player Edition)
+        case 15: { // player_id 0 (off) .. 8, wraps (8-Player extension)
             int v = (int)c.player_id + delta;
-            if (v < 0) v = 4; if (v > 4) v = 0;
+            if (v < 0) v = 8; if (v > 8) v = 0;
+            // Crossing into P5..P8 defaults BT mic off (see lcd.cpp twin).
+            if (v >= 5 && c.player_id < 5) c.bt_mic_enable = 0;
             c.player_id = (uint8_t)v;
             break;
         }

@@ -139,19 +139,25 @@ constexpr uint16_t kPureR  = rgb565(255, 0, 0);
 constexpr uint16_t kPureG  = rgb565(0, 255, 0);
 constexpr uint16_t kPureB  = rgb565(64, 100, 255); // readable blue, not #0000FF-on-black
 
-// Per-player accent — EXACTLY the PS5 player colours the 4-Player Edition
-// stamps on the lightbar (state_mgr.cpp kPlayerColor): P1 blue, P2 red,
-// P3 green, P4 pink. player_id == 0 (off) → white/neutral chrome.
-constexpr uint16_t kPlayerAccent[5] = {
+// Per-player accent — P1..P4 are EXACTLY the PS5 player colours the 4-Player
+// Edition stamps on the lightbar (state_mgr.cpp kPlayerColor): blue, red,
+// green, pink. P5..P8 are this fork's 8-Player extension colours (orange,
+// cyan, purple, yellow), kept in sync with kPlayerColor there.
+// player_id == 0 (off) → white/neutral chrome.
+constexpr uint16_t kPlayerAccent[9] = {
     kWhite,
     rgb565(0, 90, 255),    // P1 blue (brightened for text legibility)
     rgb565(255, 60, 50),   // P2 red
     rgb565(60, 220, 90),   // P3 green
     rgb565(255, 70, 160),  // P4 pink
+    rgb565(255, 140, 30),  // P5 orange
+    rgb565(40, 210, 230),  // P6 cyan
+    rgb565(170, 90, 255),  // P7 purple
+    rgb565(255, 210, 40),  // P8 yellow
 };
 inline uint16_t theme_accent() {
     const uint8_t pid = get_config().player_id;
-    return kPlayerAccent[(pid >= 1 && pid <= 4) ? pid : 0];
+    return kPlayerAccent[(pid >= 1 && pid <= 8) ? pid : 0];
 }
 
 // ── ST7789VW low-level ──────────────────────────────────────────────────────
@@ -1209,7 +1215,7 @@ __attribute__((noinline)) void render_screen() {
     draw_icon(200, 40, connected ? kIconLinkOn : kIconLinkOff, 8, 8,
               connected ? kGreen : kGrey, 2);
     const uint8_t pid = get_config().player_id;
-    if (pid >= 1 && pid <= 4) {
+    if (pid >= 1 && pid <= 8) {
         char pbadge[4];
         snprintf(pbadge, sizeof(pbadge), "P%u", pid);
         rect_filled(150, 38, 34, 20, accent);
@@ -1760,9 +1766,13 @@ void settings_adjust(int delta) {
         }
         case 13: c.bt_mic_enable ^= 1; break;
         case 14: c.controller_wakes_display ^= 1; break;
-        case 15: { // player_id 0 (off) .. 4, wraps (4-Player Edition)
+        case 15: { // player_id 0 (off) .. 8, wraps (8-Player extension)
             int v = (int)c.player_id + delta;
-            if (v < 0) v = 4; if (v > 4) v = 0;
+            if (v < 0) v = 8; if (v > 8) v = 0;
+            // Crossing into P5..P8 defaults BT mic off (2.4 GHz airtime is the
+            // scaling constraint; audio streams are the hog). Overridable —
+            // just re-enable the mic row after picking the player number.
+            if (v >= 5 && c.player_id < 5) c.bt_mic_enable = 0;
             c.player_id = (uint8_t)v;
             break;
         }
@@ -1907,7 +1917,7 @@ __attribute__((noinline)) void render_screen_settings() {
         // Player row renders in the candidate player's colour — instant
         // preview of the accent theme you're about to pick.
         uint16_t colr = (idx == settings_sel) ? kWhite : kGrey;
-        if (idx == 15 && settings_local.player_id >= 1 && settings_local.player_id <= 4) {
+        if (idx == 15 && settings_local.player_id >= 1 && settings_local.player_id <= 8) {
             colr = kPlayerAccent[settings_local.player_id];
         }
         if (idx == settings_sel) {
