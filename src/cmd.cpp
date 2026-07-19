@@ -138,10 +138,14 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
         return 1;
     }
     if (report_id == 0xfa) {
-        // OLED Edition: 4 x bd_addr (6 bytes each) + 4 x occupied flag = 28 bytes.
-        constexpr uint16_t want = 28;
-        if (reqlen < want) {
-            printf("[HID] 0xfa reqlen=%u too small for slots payload (%u)\n", reqlen, want);
+        // Slots dump. Legacy layout (28 bytes): 4 x bd_addr + 4 x occupied.
+        // v2 appends the user-given slot names: 4 x 12 chars = 76 bytes total.
+        // reqlen-gated like the 0xFD sections so old readers (web emulator)
+        // keep getting exactly the 28 bytes they always asked for.
+        constexpr uint16_t kLegacy = 28;
+        constexpr uint16_t kFull   = kLegacy + kNumSlots * kSlotNameLen; // 76
+        if (reqlen < kLegacy) {
+            printf("[HID] 0xfa reqlen=%u too small for slots payload (%u)\n", reqlen, kLegacy);
             return 0;
         }
         for (int i = 0; i < 4; i++) {
@@ -152,7 +156,13 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
         for (int i = 0; i < 4; i++) {
             buffer[24 + i] = bt_slot_occupied(i) ? 1 : 0;
         }
-        return want;
+        if (reqlen < kFull) return kLegacy;
+        for (int i = 0; i < kNumSlots; i++) {
+            char name[kSlotNameLen + 1];
+            slot_get_name(i, name);
+            memcpy(buffer + kLegacy + i * kSlotNameLen, name, kSlotNameLen);
+        }
+        return kFull;
     }
     if (report_id == 0xfb) {
         // OLED Edition: diagnostics + audio meters for the web emulator.
@@ -355,5 +365,48 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
         }
         if (remap_set(buffer + 4)) printf("[CMD] remap set ok (rev=%u)\n", remap_revision());
         else                       printf("[CMD] remap set rejected (invalid table)\n");
+    }
+    // 0x11 slot write (8-Player fleet bookkeeping). Same hardened framing idea
+    // as 0x10: magic 'S''L' + protocol version gate so a stray 0xF6 write can't
+    // touch the slot table. Persisted immediately by slots.cpp.
+    //   [0]      0x11  func-id
+    //   [1]      'S'
+    //   [2]      'L'
+    //   [3]      protocol version (1)
+    //   [4]      op: 1 = set addr+name (occupied=1), 2 = set name only, 3 = clear slot
+    //   [5]      slot index 0..3
+    //   [6..11]  bd_addr (op 1; byte order as shown on the Slots screen / 0xFA dump)
+    //   [12..23] name, 12 chars, NUL-padded (ops 1 and 2)
+    if (buffer[0] == 0x11) {
+        constexpr uint16_t kNeed = 6 + 6 + kSlotNameLen;
+        if (bufsize < kNeed) {
+            printf("[CMD] 0x11 slot-write too short (%u<%u)\n", bufsize, kNeed);
+            return;
+        }
+        if (buffer[1] != 'S' || buffer[2] != 'L' || buffer[3] != 1) {
+            printf("[CMD] 0x11 slot-write bad magic/version\n");
+            return;
+        }
+        const uint8_t op = buffer[4];
+        const int slot = buffer[5];
+        if (slot < 0 || slot >= kNumSlots) {
+            printf("[CMD] 0x11 slot index %d out of range\n", slot);
+            return;
+        }
+        char name[kSlotNameLen + 1];
+        memcpy(name, buffer + 12, kSlotNameLen);
+        name[kSlotNameLen] = 0;
+        if (op == 1) {
+            slot_set_entry(slot, buffer + 6, name);
+            printf("[CMD] slot %d set: addr+name '%s'\n", slot, name);
+        } else if (op == 2) {
+            slot_set_name(slot, name);
+            printf("[CMD] slot %d name set: '%s'\n", slot, name);
+        } else if (op == 3) {
+            slot_forget(slot);
+            printf("[CMD] slot %d cleared\n", slot);
+        } else {
+            printf("[CMD] 0x11 unknown op %u\n", op);
+        }
     }
 }

@@ -1866,10 +1866,18 @@ __attribute__((noinline)) void render_screen_slots() {
         const char *cursor_mark = (i == slots_cursor) ? ">" : " ";
         const char *active_mark = (i == active) ? "*" : " ";
         if (slot_occupied(i)) {
-            uint8_t a[6];
-            slot_get_addr(i, a);
-            snprintf(line, sizeof(line), "%s%d%s %02X:%02X:%02X:%02X:%02X:%02X",
-                     cursor_mark, i, active_mark, a[0], a[1], a[2], a[3], a[4], a[5]);
+            char nm[kSlotNameLen + 1];
+            slot_get_name(i, nm);
+            if (nm[0]) {
+                // User-named slot ("Volcanic Red") beats a hex address for
+                // telling 20 near-identical controllers apart.
+                snprintf(line, sizeof(line), "%s%d%s %s", cursor_mark, i, active_mark, nm);
+            } else {
+                uint8_t a[6];
+                slot_get_addr(i, a);
+                snprintf(line, sizeof(line), "%s%d%s %02X:%02X:%02X:%02X:%02X:%02X",
+                         cursor_mark, i, active_mark, a[0], a[1], a[2], a[3], a[4], a[5]);
+            }
         } else {
             snprintf(line, sizeof(line), "%s%d%s (empty)", cursor_mark, i, active_mark);
         }

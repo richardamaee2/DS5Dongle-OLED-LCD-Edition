@@ -2014,10 +2014,16 @@ __attribute__((noinline)) void render_screen_slots() {
         }
         char line[24];
         if (slot_occupied(i)) {
-            uint8_t a[6];
-            slot_get_addr(i, a);
-            snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X",
-                     a[0], a[1], a[2], a[3], a[4], a[5]);
+            char nm[kSlotNameLen + 1];
+            slot_get_name(i, nm);
+            if (nm[0]) {
+                snprintf(line, sizeof(line), "%s", nm);   // user label wins over hex
+            } else {
+                uint8_t a[6];
+                slot_get_addr(i, a);
+                snprintf(line, sizeof(line), "%02X:%02X:%02X:%02X:%02X:%02X",
+                         a[0], a[1], a[2], a[3], a[4], a[5]);
+            }
             draw_text(30, y, line, (i == slots_cursor) ? kWhite : kGrey, 2);
         } else {
             draw_text(30, y, "(empty)", kDGrey, 2);

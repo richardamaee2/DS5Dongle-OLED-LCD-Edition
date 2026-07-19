@@ -9,13 +9,21 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 
-constexpr uint32_t SLOTS_MAGIC = 0x44533502u;  // "DS5\x02"
+constexpr uint32_t SLOTS_MAGIC_V1 = 0x44533502u;  // "DS5\x02" — pre-names layout
+constexpr uint32_t SLOTS_MAGIC    = 0x44533503u;  // "DS5\x03" — adds per-slot names
 constexpr uint32_t SLOTS_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - 2u * FLASH_SECTOR_SIZE;
+
+struct __attribute__((packed)) SlotsDataV1 {
+    uint32_t magic;
+    uint8_t  addrs[kNumSlots][6];
+    uint8_t  occupied[kNumSlots];
+};
 
 struct __attribute__((packed)) SlotsData {
     uint32_t magic;
     uint8_t  addrs[kNumSlots][6];
     uint8_t  occupied[kNumSlots];
+    char     names[kNumSlots][kSlotNameLen + 1]; // NUL-padded user labels
 };
 
 static_assert(sizeof(SlotsData) <= FLASH_PAGE_SIZE);
@@ -49,7 +57,17 @@ static bool save_slots_to_flash() {
 
 void slots_load() {
     memcpy(&g_slots, flash_slots(), sizeof(g_slots));
-    if (g_slots.magic != SLOTS_MAGIC) {
+    if (g_slots.magic == SLOTS_MAGIC_V1) {
+        // Migrate v1 → v2: same leading layout, names arrive blank. One-time.
+        printf("[Slots] migrating v1 slot table (adding name fields)\n");
+        SlotsDataV1 v1{};
+        memcpy(&v1, flash_slots(), sizeof(v1));
+        memset(&g_slots, 0, sizeof(g_slots));
+        g_slots.magic = SLOTS_MAGIC;
+        memcpy(g_slots.addrs, v1.addrs, sizeof(v1.addrs));
+        memcpy(g_slots.occupied, v1.occupied, sizeof(v1.occupied));
+        save_slots_to_flash();
+    } else if (g_slots.magic != SLOTS_MAGIC) {
         printf("[Slots] flash sector empty/invalid, initializing\n");
         memset(&g_slots, 0, sizeof(g_slots));
         g_slots.magic = SLOTS_MAGIC;
@@ -88,6 +106,11 @@ int slot_owner_of(const uint8_t addr[6]) {
 
 void slot_assign(int slot, const uint8_t addr[6]) {
     if (slot < 0 || slot >= kNumSlots) return;
+    // A different controller taking the slot invalidates the old label —
+    // keep the name only when the same pad re-bonds.
+    if (memcmp(g_slots.addrs[slot], addr, 6) != 0) {
+        memset(g_slots.names[slot], 0, sizeof(g_slots.names[slot]));
+    }
     memcpy(g_slots.addrs[slot], addr, 6);
     g_slots.occupied[slot] = 1;
     save_slots_to_flash();
@@ -97,6 +120,7 @@ void slot_forget(int slot) {
     if (slot < 0 || slot >= kNumSlots) return;
     memset(g_slots.addrs[slot], 0, 6);
     g_slots.occupied[slot] = 0;
+    memset(g_slots.names[slot], 0, sizeof(g_slots.names[slot]));
     save_slots_to_flash();
 }
 
@@ -104,7 +128,37 @@ void slots_wipe_all() {
     for (int i = 0; i < kNumSlots; i++) {
         memset(g_slots.addrs[i], 0, 6);
         g_slots.occupied[i] = 0;
+        memset(g_slots.names[i], 0, sizeof(g_slots.names[i]));
     }
+    save_slots_to_flash();
+}
+
+void slot_get_name(int slot, char out[kSlotNameLen + 1]) {
+    if (slot < 0 || slot >= kNumSlots) { out[0] = 0; return; }
+    memcpy(out, g_slots.names[slot], kSlotNameLen);
+    out[kSlotNameLen] = 0;
+}
+
+static void copy_name(int slot, const char *name) {
+    memset(g_slots.names[slot], 0, sizeof(g_slots.names[slot]));
+    if (!name) return;
+    for (int i = 0; i < kSlotNameLen && name[i]; i++) {
+        // printable ASCII only — the 5x7 font has nothing else to offer
+        g_slots.names[slot][i] = (name[i] >= 0x20 && name[i] < 0x7F) ? name[i] : '_';
+    }
+}
+
+void slot_set_name(int slot, const char *name) {
+    if (slot < 0 || slot >= kNumSlots) return;
+    copy_name(slot, name);
+    save_slots_to_flash();
+}
+
+void slot_set_entry(int slot, const uint8_t addr[6], const char *name) {
+    if (slot < 0 || slot >= kNumSlots) return;
+    memcpy(g_slots.addrs[slot], addr, 6);
+    g_slots.occupied[slot] = 1;
+    copy_name(slot, name);
     save_slots_to_flash();
 }
 
