@@ -210,6 +210,51 @@ def write_config(device, cfg):
 
 SLOT_NAME_LEN = 12
 
+# --- Windows reality check -------------------------------------------------
+# The dongle's DS5-mode HID descriptor is kept byte-identical to a real
+# DualSense (native adaptive-trigger detection depends on it), so the vendor
+# reports 0xF6..0xFD are NOT declared — and the Windows HID stack refuses
+# undeclared report IDs outright ("OSError: read error"). Consequences:
+#   * On Linux (incl. WSL2 + usbipd) everything below works as designed.
+#   * On Windows in DS5 mode, all vendor reads/writes fail.
+#   * On Windows in DSE mode (controller_mode=dse, switchable via the dongle's
+#     Settings screen), 0xF6..0xF9 ARE declared: config writes (--player,
+#     --polling, --pair-lock, --slot-set, ...) plus --version/--rssi work.
+#     0xFA (--slots) and 0xFD (--latency) stay Linux-only; read slot tables
+#     off the dongle's screen instead, or under WSL.
+#   * Report 0x09 (pairing info) is declared in EVERY mode — see --pad-id.
+# ---------------------------------------------------------------------------
+
+def get_pad_id(device):
+    """Read feature report 0x09 (pairing info) — declared in the genuine DS5
+    descriptor, so this works on Windows against BOTH a real controller on a
+    USB cable AND a dongle (which serves its bonded pad's real cached data
+    once that pad has connected over BT at least once)."""
+    raw = bytes(device.get_feature_report(0x09, 20))
+    if len(raw) < 7:
+        return None
+    mac = raw[1:7]
+    return {
+        'fwd': ':'.join(f'{b:02X}' for b in mac),
+        'rev': ':'.join(f'{b:02X}' for b in reversed(mac)),
+        'raw': raw.hex(' '),
+    }
+
+
+def print_pad_id(device):
+    info = get_pad_id(device)
+    if info is None:
+        print("[ERROR] pairing-info report too short", file=sys.stderr)
+        return
+    print("Pairing info (feature report 0x09):")
+    print(f"  MAC (as-stored) : {info['fwd']}")
+    print(f"  MAC (reversed)  : {info['rev']}")
+    print(f"  raw             : {info['raw']}")
+    print("One of the two MAC orderings matches the dongle Slots screen /")
+    print("--slots dump — compare once against a paired dongle's screen and")
+    print("use that orientation for your controller database + --slot-addr.")
+
+
 def get_slots(device):
     """Read the 0xFA slot dump: [4x addr(6)][4x occupied][4x name(12)] = 76.
     Falls back gracefully on pre-name firmware (28-byte legacy layout)."""
@@ -230,7 +275,15 @@ def get_slots(device):
 
 
 def print_slots(device):
-    slots = get_slots(device)
+    try:
+        slots = get_slots(device)
+    except OSError:
+        print("[ERROR] 0xFA slot dump refused by the OS.", file=sys.stderr)
+        print("  On Windows this is expected (undeclared vendor report; see the", file=sys.stderr)
+        print("  note at the top of this file). Options: read the Slots screen on", file=sys.stderr)
+        print("  the dongle, run this under WSL2/Linux, or use --pad-id to read", file=sys.stderr)
+        print("  the bonded controller's MAC (works on Windows in every mode).", file=sys.stderr)
+        return
     if slots is None:
         print("[ERROR] slot dump unavailable", file=sys.stderr)
         return
@@ -390,6 +443,9 @@ def build_parser():
                    help="user label for --slot-set, max 12 chars (e.g. \"Volcanic Red\")")
     p.add_argument('--slot-clear', type=int, choices=[0, 1, 2, 3], metavar='N',
                    help="clear slot N (address + name)")
+    p.add_argument('--pad-id', action='store_true',
+                   help="print the controller MAC from pairing report 0x09 "
+                        "(Windows-safe; works on a cabled pad or a dongle whose pad has connected)")
     p.add_argument('--pair-lock', choices=['on', 'off'],
                    help="4-Player Edition: lock pairing to the already-bonded controllers")
     return p
@@ -398,6 +454,10 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     device = open_device()
+
+    if args.pad_id:
+        print_pad_id(device)
+        return
 
     # Slot bookkeeping ops are terminal commands, like the reads below.
     if args.slot_set is not None or args.slot_clear is not None:
