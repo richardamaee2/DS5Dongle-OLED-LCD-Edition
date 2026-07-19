@@ -487,8 +487,9 @@ def main():
                 print("[ERROR] --slot-set needs --slot-addr and/or --slot-name",
                       file=sys.stderr)
                 sys.exit(1)
-        print_slots(device)
-        return
+        print("[OK] write accepted by the dongle.")
+        print_slots(device)   # read-back works on Linux; on Windows it prints
+        return                # a note instead - verify on the Slots screen.
     if args.slots:
         print_slots(device)
         return
