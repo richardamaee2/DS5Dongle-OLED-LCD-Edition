@@ -309,7 +309,17 @@ def slot_write(device, op, slot, addr=b'\x00' * 6, name=''):
     nm = name.encode('ascii', errors='replace')[:SLOT_NAME_LEN]
     nm = nm + b'\x00' * (SLOT_NAME_LEN - len(nm))
     payload = bytes([0xF6, 0x11, ord('S'), ord('L'), 1, op, slot]) + addr + nm
-    device.send_feature_report(payload)
+    try:
+        ret = device.send_feature_report(payload)
+    except OSError:
+        ret = -1
+    if ret is not None and ret < 0:
+        print("[ERROR] 0xF6 slot write refused by the OS — nothing was changed.", file=sys.stderr)
+        print("  On Windows the dongle must be in DSE mode for config writes:", file=sys.stderr)
+        print("  Settings screen -> controller mode -> DSE -> save -> replug USB,", file=sys.stderr)
+        print("  rerun this command, then switch the mode back for play.", file=sys.stderr)
+        print("  (Or run under WSL2/Linux, where every mode works.)", file=sys.stderr)
+        sys.exit(1)
 
 
 def get_version(device):
