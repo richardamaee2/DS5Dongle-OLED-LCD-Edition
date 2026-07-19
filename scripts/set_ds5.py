@@ -30,6 +30,9 @@ Quick usage:
   scripts/set_ds5.py --auto-haptics fallback --auto-haptics-gain 120
   scripts/set_ds5.py --haptics-gain 1.5 --speaker-volume -10
   scripts/set_ds5.py --slot 2              # switch active pairing slot
+  scripts/set_ds5.py --slots               # dump slot table (BT addr + name)
+  scripts/set_ds5.py --slot-set 0 --slot-addr 12:34:56:78:9A:BC --slot-name "Volcanic Red"
+  scripts/set_ds5.py --slot-set 1 --slot-name "Cosmic Red"   # rename, keep addr
   scripts/set_ds5.py --version             # print firmware version
   scripts/set_ds5.py --rssi                # print live BT RSSI in dBm
   scripts/set_ds5.py --latency             # print dongle latency telemetry
@@ -205,6 +208,57 @@ def write_config(device, cfg):
     device.send_feature_report(b'\xf6\x02')
 
 
+SLOT_NAME_LEN = 12
+
+def get_slots(device):
+    """Read the 0xFA slot dump: [4x addr(6)][4x occupied][4x name(12)] = 76.
+    Falls back gracefully on pre-name firmware (28-byte legacy layout)."""
+    raw = bytes(device.get_feature_report(0xFA, 77))   # id echo + up to 76
+    data = raw[1:]
+    if len(data) < 28:
+        return None
+    slots = []
+    for i in range(4):
+        addr = data[i * 6:i * 6 + 6]
+        occ = data[24 + i] != 0
+        name = ''
+        if len(data) >= 76:
+            name = data[28 + i * SLOT_NAME_LEN:28 + (i + 1) * SLOT_NAME_LEN] \
+                .rstrip(b'\x00').decode('ascii', errors='replace')
+        slots.append({'addr': ':'.join(f'{b:02X}' for b in addr), 'occupied': occ, 'name': name})
+    return slots
+
+
+def print_slots(device):
+    slots = get_slots(device)
+    if slots is None:
+        print("[ERROR] slot dump unavailable", file=sys.stderr)
+        return
+    print("Slot table (this dongle):")
+    for i, s in enumerate(slots):
+        if s['occupied']:
+            label = f"  {s['name']}" if s['name'] else "  (unnamed)"
+            print(f"  slot {i}: {s['addr']}{label}")
+        else:
+            print(f"  slot {i}: (empty)")
+
+
+def parse_bd_addr(text):
+    parts = text.replace('-', ':').split(':')
+    if len(parts) != 6:
+        raise ValueError(f"bad BT address '{text}' (want AA:BB:CC:DD:EE:FF)")
+    return bytes(int(p, 16) for p in parts)
+
+
+def slot_write(device, op, slot, addr=b'\x00' * 6, name=''):
+    """0xF6 func 0x11: op 1 = set addr+name, 2 = set name only, 3 = clear.
+    Address byte order matches the Slots screen / 0xFA dump exactly."""
+    nm = name.encode('ascii', errors='replace')[:SLOT_NAME_LEN]
+    nm = nm + b'\x00' * (SLOT_NAME_LEN - len(nm))
+    payload = bytes([0xF6, 0x11, ord('S'), ord('L'), 1, op, slot]) + addr + nm
+    device.send_feature_report(payload)
+
+
 def get_version(device):
     raw = bytes(device.get_feature_report(0xF8, 64))
     return raw[1:].rstrip(b'\x00').decode('ascii', errors='replace')
@@ -326,6 +380,16 @@ def build_parser():
                    help="player identity for THIS dongle (off, 1-8; 5+ defaults BT mic off)")
     p.add_argument('--bt-mic', choices=['on', 'off'],
                    help="DualSense mic over BT (costs controller battery + 2.4 GHz airtime)")
+    p.add_argument('--slots', action='store_true',
+                   help="print this dongle's slot table (BT address + user name per slot)")
+    p.add_argument('--slot-set', type=int, choices=[0, 1, 2, 3], metavar='N',
+                   help="write slot N: combine with --slot-addr and/or --slot-name")
+    p.add_argument('--slot-addr', metavar='AA:BB:CC:DD:EE:FF',
+                   help="BT address for --slot-set (as shown by --slots)")
+    p.add_argument('--slot-name', metavar='NAME',
+                   help="user label for --slot-set, max 12 chars (e.g. \"Volcanic Red\")")
+    p.add_argument('--slot-clear', type=int, choices=[0, 1, 2, 3], metavar='N',
+                   help="clear slot N (address + name)")
     p.add_argument('--pair-lock', choices=['on', 'off'],
                    help="4-Player Edition: lock pairing to the already-bonded controllers")
     return p
@@ -334,6 +398,30 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     device = open_device()
+
+    # Slot bookkeeping ops are terminal commands, like the reads below.
+    if args.slot_set is not None or args.slot_clear is not None:
+        if args.slot_name and len(args.slot_name) > SLOT_NAME_LEN:
+            print(f"[note] name truncated to {SLOT_NAME_LEN} chars: "
+                  f"'{args.slot_name[:SLOT_NAME_LEN]}'")
+        if args.slot_clear is not None:
+            slot_write(device, 3, args.slot_clear)
+            print(f"slot {args.slot_clear} cleared")
+        if args.slot_set is not None:
+            if args.slot_addr:
+                addr = parse_bd_addr(args.slot_addr)
+                slot_write(device, 1, args.slot_set, addr, args.slot_name or '')
+            elif args.slot_name is not None:
+                slot_write(device, 2, args.slot_set, name=args.slot_name)
+            else:
+                print("[ERROR] --slot-set needs --slot-addr and/or --slot-name",
+                      file=sys.stderr)
+                sys.exit(1)
+        print_slots(device)
+        return
+    if args.slots:
+        print_slots(device)
+        return
 
     if args.version:
         print(f"Firmware: {get_version(device)}")
